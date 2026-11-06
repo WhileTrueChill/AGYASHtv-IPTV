@@ -145,6 +145,19 @@ jobs:
         run: node --check desktop/main.cjs && node --check desktop/preload.cjs
         shell: bash
 
+      - name: Download packaged PC web app
+        uses: actions/download-artifact@v4
+        with:
+          name: AGYASHtv-PC-Web
+          path: desktop/artifacts
+
+      - name: Prepare local desktop web app and API
+        shell: pwsh
+        run: |
+          Expand-Archive -Path desktop/artifacts/AGYASHtv-PC-Web.zip -DestinationPath desktop/web -Force
+          New-Item -ItemType Directory -Force -Path desktop/api | Out-Null
+          Copy-Item api/xtream.js desktop/api/xtream.js -Force
+
       - name: Install desktop dependencies
         run: npm install --prefix desktop
 
