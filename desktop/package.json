@@ -1,14 +1,11 @@
 {
   "name": "agyashtv-desktop",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "AGYASHtv IPTV desktop app",
   "main": "main.cjs",
   "scripts": {
     "dist:win": "electron-builder --win nsis --x64"
-  },
-  "dependencies": {
-    "express": "^5.1.0"
   },
   "devDependencies": {
     "electron": "^39.0.0",
@@ -25,8 +22,7 @@
       "preload.cjs",
       "package.json",
       "api/**/*",
-      "web/**/*",
-      "node_modules/**/*"
+      "web/**/*"
     ],
     "win": {
       "target": [
