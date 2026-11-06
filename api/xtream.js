@@ -56,11 +56,13 @@ function decryptPayload(token) {
 
 function createSessionCookie(providerBase, username, password) {
   const token = encryptPayload({ type: "session", providerBase, username, password });
-  return `${SESSION_COOKIE}=${token}; Path=/api/xtream; Max-Age=${SESSION_TTL_SECONDS}; HttpOnly; Secure; SameSite=Lax`;
+  const secure = process.env.AGYASHTV_LOCAL_DESKTOP === "1" ? "" : " Secure;";
+  return `${SESSION_COOKIE}=${token}; Path=/api/xtream; Max-Age=${SESSION_TTL_SECONDS}; HttpOnly;${secure} SameSite=Lax`;
 }
 
 function expireSessionCookie() {
-  return `${SESSION_COOKIE}=; Path=/api/xtream; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
+  const secure = process.env.AGYASHTV_LOCAL_DESKTOP === "1" ? "" : " Secure;";
+  return `${SESSION_COOKIE}=; Path=/api/xtream; Max-Age=0; HttpOnly;${secure} SameSite=Lax`;
 }
 
 function readCookie(req, name) {
