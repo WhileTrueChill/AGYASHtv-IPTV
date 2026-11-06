@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "AGYASHtv",
+    "slug": "agyashtv",
+    "version": "1.0.0",
+    "orientation": "default",
+    "userInterfaceStyle": "dark",
+    "scheme": "agyashtv",
+    "android": {
+      "package": "com.agyash.tv",
+      "versionCode": 1,
+      "permissions": [],
+      "softwareKeyboardLayoutMode": "pan"
+    },
+    "plugins": [
+      "@react-native-tvos/config-tv",
+      "expo-video",
+      "./plugins/withAndroidTV"
+    ],
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "name": "AGYASHtv",
+      "shortName": "AGYASHtv",
+      "description": "AGYASHtv player for authorized IPTV subscriptions",
+      "themeColor": "#08090D",
+      "backgroundColor": "#08090D",
+      "display": "standalone"
+    }
+  }
+}
