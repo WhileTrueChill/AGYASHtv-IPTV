@@ -1,0 +1,172 @@
+name: Build AGYASHtv Android APK and PC web app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "App.tsx"
+      - "app.json"
+      - "package.json"
+      - "tsconfig.json"
+      - "api/**"
+      - "plugins/**"
+      - "vercel.json"
+      - "desktop/**"
+      - ".github/workflows/build-platforms.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Mobile APK, Android TV APK, and PC web app
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Check serverless API syntax
+        run: node --check api/config.js && node --check api/xtream.js
+
+      - name: Type-check application
+        run: npm run typecheck
+
+      - name: Generate mobile Android project
+        run: npx expo prebuild --platform android --no-install --clean
+
+      - name: Build mobile release APK with bundled JavaScript
+        env:
+          EXPO_PUBLIC_API_ORIGIN: ${{ vars.AGYASHTV_API_ORIGIN || 'https://agyas-htv.vercel.app' }}
+        run: cd android && ./gradlew assembleRelease
+
+      - name: Stage mobile APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk AGYASHtv-Mobile.apk
+
+      - name: Generate Android TV project
+        env:
+          EXPO_TV: "1"
+        run: npx expo prebuild --platform android --no-install --clean
+
+      - name: Build Android TV release APK with bundled JavaScript
+        env:
+          EXPO_TV: "1"
+          EXPO_PUBLIC_API_ORIGIN: ${{ vars.AGYASHTV_API_ORIGIN || 'https://agyas-htv.vercel.app' }}
+        run: cd android && ./gradlew assembleRelease
+
+      - name: Stage Android TV APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk AGYASHtv-AndroidTV.apk
+
+      - name: Export PC web build
+        run: npm run build:web
+
+      - name: Package PC web build
+        run: cd dist && zip -qr ../AGYASHtv-PC-Web.zip .
+
+      - name: Upload mobile APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AGYASHtv-Mobile-APK
+          path: AGYASHtv-Mobile.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Android TV APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AGYASHtv-AndroidTV-APK
+          path: AGYASHtv-AndroidTV.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload PC web package
+        uses: actions/upload-artifact@v4
+        with:
+          name: AGYASHtv-PC-Web
+          path: AGYASHtv-PC-Web.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish latest downloads
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: AGYASHtv Latest Build
+          body: |
+            AGYASHtv beta builds for Android mobile, Android TV, and PC web.
+            Sign in with an authorized IPTV subscription. Enter your own IPTV Server URL, username and password on the login screen.
+            - AGYASHtv-Mobile.apk: Android mobile release APK with JavaScript bundled
+            - AGYASHtv-AndroidTV.apk: Android TV release APK with Leanback launcher support
+            - AGYASHtv-PC-Web.zip: browser version for HTTPS hosting
+          prerelease: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            AGYASHtv-Mobile.apk
+            AGYASHtv-AndroidTV.apk
+            AGYASHtv-PC-Web.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-windows-desktop:
+    name: Build Windows desktop installer
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check Electron entry points
+        run: node --check desktop/main.cjs && node --check desktop/preload.cjs
+        shell: bash
+
+      - name: Install desktop dependencies
+        run: npm install --prefix desktop
+
+      - name: Build Windows installer
+        run: npm run --prefix desktop dist:win
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AGYASHtv-Windows-Installer
+          path: desktop/dist/AGYASHtv-Setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish Windows installer to latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: AGYASHtv Latest Build
+          prerelease: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            desktop/dist/AGYASHtv-Setup.exe
+          token: ${{ secrets.GITHUB_TOKEN }}
