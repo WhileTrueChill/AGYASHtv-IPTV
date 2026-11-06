@@ -280,7 +280,7 @@ export default function App() {
       setSignedIn(false);
       const message = e instanceof Error ? e.message : readableApiError(e, "Login failed. Try again.");
       setError(message === "[object Object]"
-        ? "The server returned an unreadable error. Confirm Vercel Root Directory is the repository root and XTREAM_BASE_URL is configured, then redeploy."
+        ? "The server returned an unreadable error. Check the Server URL, username, password and Vercel API deployment, then try again."
         : message);
     } finally {
       setBusy(false);
@@ -332,7 +332,7 @@ export default function App() {
     }
     setBusy(true); setError("");
     try {
-      const detail = await apiRequest<{ episodes?: Record<string, Episode[]> }>(username.trim(), password, "get_series_info", { series_id: item.series_id ?? item.stream_id ?? "" });
+      const detail = await apiRequest<{ episodes?: Record<string, Episode[]> }>(resolvedProviderBase, username.trim(), password, "get_series_info", { series_id: item.series_id ?? item.stream_id ?? "" });
       const episodes = Object.values(detail.episodes || {}).flat().sort((a, b) => Number(a.season || 0) - Number(b.season || 0) || Number(a.episode_num || 0) - Number(b.episode_num || 0));
       if (!episodes.length) { setError("No episodes were returned for this series."); return; }
       setEpisodePicker({ series: item, episodes });
