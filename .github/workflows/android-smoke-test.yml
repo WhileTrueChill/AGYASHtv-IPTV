@@ -1,0 +1,72 @@
+name: Smoke-test Android mobile and TV builds
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "App.tsx"
+      - "app.json"
+      - "package.json"
+      - "tsconfig.json"
+      - "plugins/**"
+      - ".github/workflows/android-smoke-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Compile Android ${{ matrix.variant }} APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: mobile
+            tv: "0"
+          - variant: android-tv
+            tv: "1"
+    env:
+      EXPO_TV: ${{ matrix.tv }}
+      EXPO_PUBLIC_API_ORIGIN: 'https://agyas-htv.vercel.app'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Type-check source
+        run: npm run typecheck
+
+      - name: Generate native Android project
+        run: npx expo prebuild --platform android --no-install --clean
+
+      - name: Compile release APK
+        run: cd android && ./gradlew assembleRelease
+
+      - name: Upload smoke-test APK (not a customer release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AGYASHtv-${{ matrix.variant }}-smoke-test
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 7
