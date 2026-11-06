@@ -1,0 +1,44 @@
+name: Validate AGYASHtv source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "App.tsx"
+      - "app.json"
+      - "package.json"
+      - "tsconfig.json"
+      - "plugins/**"
+      - "api/**"
+      - ".github/workflows/validate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Type-check and export PC web app
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Check serverless API syntax
+        run: node --check api/config.js && node --check api/xtream.js
+
+      - name: Type-check application
+        run: npm run typecheck
+
+      - name: Export web app
+        run: npm run build:web
+
