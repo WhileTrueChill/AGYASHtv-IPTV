@@ -4,8 +4,7 @@ import {
   SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View,
   useWindowDimensions,
 } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as SecureStore from "expo-secure-store";
+import { storageGet, storageSet, storageRemove } from "./storage";
 import NativeVideoPlayerModal from "./NativeVideoPlayerModal";
 
 type MediaKind = "live" | "movie" | "series";
@@ -60,18 +59,6 @@ const NAV_ITEMS: { key: "live" | "movie" | "series" | "mylist"; label: string; i
   { key: "series", label: "Series", icon: "▤" },
   { key: "mylist", label: "My List", icon: "♡" },
 ];
-
-async function storageGet(key: string): Promise<string | null> {
-  return Platform.OS === "web" ? AsyncStorage.getItem(key) : SecureStore.getItemAsync(key);
-}
-async function storageSet(key: string, value: string): Promise<void> {
-  if (Platform.OS === "web") return AsyncStorage.setItem(key, value);
-  return SecureStore.setItemAsync(key, value);
-}
-async function storageRemove(key: string): Promise<void> {
-  if (Platform.OS === "web") return AsyncStorage.removeItem(key);
-  return SecureStore.deleteItemAsync(key);
-}
 
 async function apiRequest<T>(providerBase: string, username: string, password: string, action?: string, extra: Record<string, string | number> = {}): Promise<T> {
   const params = { ...extra };
