@@ -5,7 +5,7 @@ import {
   useWindowDimensions,
 } from "react-native";
 import { storageGet, storageSet, storageRemove } from "./storage";
-import NativeVideoPlayerModal from "./NativeVideoPlayerModal";
+import NativeVideoPlayerModal from "./NativeVideoPlayerModal"; // Platform-specific implementations are selected by Metro.
 
 type MediaKind = "live" | "movie" | "series";
 type Category = { category_id: string | number; category_name: string };
