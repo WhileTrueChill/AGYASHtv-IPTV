@@ -6,7 +6,7 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
-import { VideoView, useVideoPlayer } from "expo-video";
+import NativeVideoPlayerModal from "./NativeVideoPlayerModal";
 
 type MediaKind = "live" | "movie" | "series";
 type Category = { category_id: string | number; category_name: string };
@@ -110,19 +110,6 @@ function streamUrl(kind: MediaKind, item: MediaItem | Episode, username: string,
     return `/api/xtream?${query.toString()}`;
   }
   return `${resolvedProviderBase}/${kind === "movie" ? "movie" : kind === "series" ? "series" : "live"}/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${encodeURIComponent(id)}.${extension}`;
-}
-
-function NativeVideoPlayerModal({ uri, title, onClose }: { uri: string; title: string; onClose: () => void }) {
-  const player = useVideoPlayer(uri, (instance) => { instance.play(); });
-  return (
-    <View style={styles.playerBackdrop}>
-      <View style={styles.playerHeader}>
-        <Text style={styles.playerTitle} numberOfLines={1}>{title}</Text>
-        <Pressable onPress={onClose} style={styles.closeButton} accessibilityLabel="Close player"><Text style={styles.closeText}>✕</Text></Pressable>
-      </View>
-      <VideoView player={player} style={styles.video} nativeControls contentFit="contain" />
-    </View>
-  );
 }
 
 function WebVideoPlayerModal({ uri, title, onClose }: { uri: string; title: string; onClose: () => void }) {
