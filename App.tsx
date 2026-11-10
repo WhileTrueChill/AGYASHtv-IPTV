@@ -543,7 +543,7 @@ export default function App() {
         <View style={styles.contentPane}>
           <ScrollView contentContainerStyle={[styles.contentScroll, compactLayout && styles.mobileContentScroll]} showsVerticalScrollIndicator={false}>
             {tab !== "mylist" && <View style={styles.heroBanner}>
-              {heroArtwork && !heroImageFailed && <Image source={{ uri: heroArtwork }} style={styles.heroImage} resizeMode="cover" pointerEvents="none" onError={() => setHeroImageFailed(true)}/>}
+              {heroArtwork && !heroImageFailed && <View style={styles.heroImage} pointerEvents="none"><Image source={{ uri: heroArtwork }} style={StyleSheet.absoluteFillObject} resizeMode="cover" onError={() => setHeroImageFailed(true)}/></View>}
               <View style={styles.heroScrim} pointerEvents="none"/>
               <View style={styles.heroContent}>
                 <Text style={styles.heroEyebrow}>{featuredItem ? (featuredKind === "live" ? "NOW STREAMING" : "FEATURED ON AGYASHtv") : "STREAM YOUR WAY"}</Text>
