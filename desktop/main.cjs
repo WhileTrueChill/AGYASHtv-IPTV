@@ -41,9 +41,11 @@ function startLocalServer() {
         };
         try { await xtreamHandler(req, res); }
         catch (error) {
+          console.error("[AGYASHtv local API]", error);
           if (!res.headersSent) {
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "AGYASHtv local API error." }));
+            res.writeHead(502, { "Content-Type": "application/json" });
+            const detail = error instanceof Error ? error.message : "Unexpected local API error.";
+            res.end(JSON.stringify({ error: `AGYASHtv local API error: ${detail}` }));
           } else res.destroy(error);
         }
         return;
