@@ -51,8 +51,60 @@ function normalizeProviderBase(value: string): string {
   return parsed.toString().replace(/\/+$/, "");
 }
 
+// IPTV providers sometimes return local Windows file paths or malformed CDN
+// URLs for channel logos. Convert known local /images paths to the provider
+// origin and reject file:// resources so desktop browsers do not spam errors.
+function normalizeArtworkUrl(value?: string): string | undefined {
+  const raw = String(value || "").trim();
+  if (!raw) return undefined;
+
+  const localPath = raw.toLowerCase().lastIndexOf("/images/");
+  if (/^file:/i.test(raw) || /^[a-z]:[\\/]/i.test(raw)) {
+    if (localPath >= 0 && resolvedProviderBase) {
+      try { return new URL(raw.slice(localPath), resolvedProviderBase).toString(); } catch { return undefined; }
+    }
+    return undefined;
+  }
+
+  if (/^\/(?!\/)/.test(raw)) {
+    if (!resolvedProviderBase) return undefined;
+    try { return new URL(raw, resolvedProviderBase).toString(); } catch { return undefined; }
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    if (!resolvedProviderBase || !raw.includes("/")) return undefined;
+    try { return new URL(raw.replace(/^\.\//, ""), resolvedProviderBase).toString(); } catch { return undefined; }
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) return undefined;
+
+  if (parsed.hostname.toLowerCase() === "plexflix.to" &&
+      parsed.pathname.toLowerCase().startsWith("/plexflix.to/") &&
+      resolvedProviderBase) {
+    try {
+      const provider = new URL(resolvedProviderBase);
+      parsed.protocol = provider.protocol;
+      parsed.host = provider.host;
+      parsed.pathname = parsed.pathname.replace(/^\/plexflix\.to\//i, "/");
+    } catch { return undefined; }
+  }
+
+  if (resolvedProviderBase && parsed.protocol === "http:") {
+    try {
+      const provider = new URL(resolvedProviderBase);
+      if (provider.protocol === "https:" && parsed.hostname === provider.hostname) parsed.protocol = "https:";
+    } catch { /* Keep the original valid image URL. */ }
+  }
+
+  return parsed.toString();
+}
+
 const CREDENTIAL_KEY = "agyashtv.savedCredentials";
 const FAVORITES_KEY = "agyashtv.myList";
+const RECENT_KEY = "agyashtv.recentlyWatched";
 const NAV_ITEMS: { key: "live" | "movie" | "series" | "mylist"; label: string; icon: string }[] = [
   { key: "live", label: "Live TV", icon: "◉" },
   { key: "movie", label: "Movies", icon: "▶" },
@@ -150,15 +202,18 @@ function Logo() {
   return <View style={styles.logoWrap}><View style={styles.logoGlyph}><Text style={styles.logoGlyphText}>A</Text></View><Text style={styles.logoText}>AGYASH<Text style={styles.logoAccent}>tv</Text></Text></View>;
 }
 
-function MediaCard({ item, kind, onPress, saved, onToggleSaved }: {
-  item: MediaItem; kind: MediaKind; onPress: () => void; saved: boolean; onToggleSaved: () => void;
+function MediaCard({ item, kind, onPress, saved, onToggleSaved, compact = false }: {
+  item: MediaItem; kind: MediaKind; onPress: () => void; saved: boolean; onToggleSaved: () => void; compact?: boolean;
 }) {
   const initial = item.name?.trim()?.charAt(0)?.toUpperCase() || "A";
-  const image = item.stream_icon || item.cover;
+  const image = normalizeArtworkUrl(item.stream_icon || item.cover);
+  const [imageFailed, setImageFailed] = useState(false);
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, compact && styles.recentCard]}>
       <Pressable onPress={onPress} style={({ pressed, focused }) => [styles.poster, pressed && styles.pressed, focused && styles.focused]} accessibilityRole="button">
-        {image ? <View style={styles.posterImageArea}><Image source={{ uri: image }} style={styles.posterImage} resizeMode="cover" onError={() => {}} /></View> : <View style={styles.posterFallbackArea}><Text style={styles.posterFallback}>{initial}</Text></View>}
+        {image && !imageFailed
+          ? <View style={styles.posterImageArea}><Image source={{ uri: image }} style={styles.posterImage} resizeMode="cover" onError={() => setImageFailed(true)} /></View>
+          : <View style={styles.posterFallbackArea}><Text style={styles.posterFallback}>{initial}</Text></View>}
         <View style={styles.posterOverlay}><Text style={styles.playGlyph}>▶</Text></View>
         <View style={styles.kindPill}><Text style={styles.kindText}>{kind === "live" ? "LIVE" : kind === "movie" ? "MOVIE" : "SERIES"}</Text></View>
       </Pressable>
@@ -172,7 +227,7 @@ function MediaCard({ item, kind, onPress, saved, onToggleSaved }: {
 
 export default function App() {
   const { width } = useWindowDimensions();
-  const compactLayout = width < 720;
+  const compactLayout = width < 940;
   const columns = width >= 1400 ? 6 : width >= 1050 ? 5 : width >= 760 ? 4 : width >= 520 ? 3 : 2;
   const [providerUrl, setProviderUrl] = useState("");
   const [username, setUsername] = useState("");
@@ -193,6 +248,9 @@ export default function App() {
   const [seriesCategories, setSeriesCategories] = useState<Category[]>([]);
   const [category, setCategory] = useState<string>("all");
   const [favorites, setFavorites] = useState<MediaItem[]>([]);
+  const [recentlyWatched, setRecentlyWatched] = useState<MediaItem[]>([]);
+  const [heroIndex, setHeroIndex] = useState(0);
+  const [heroImageFailed, setHeroImageFailed] = useState(false);
   const [playing, setPlaying] = useState<{ uri: string; title: string } | null>(null);
   const [episodePicker, setEpisodePicker] = useState<{ series: MediaItem; episodes: Episode[] } | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -209,6 +267,8 @@ export default function App() {
         }
         const savedFavorites = await storageGet(FAVORITES_KEY);
         if (savedFavorites) setFavorites(JSON.parse(savedFavorites));
+        const savedRecent = await storageGet(RECENT_KEY);
+        if (savedRecent) setRecentlyWatched(JSON.parse(savedRecent));
       } catch { /* Ignore corrupt local preferences. */ }
     })();
   }, []);
@@ -285,6 +345,11 @@ export default function App() {
   }, [tab, live, movies, series, favorites]);
 
   const activeCategories = tab === "movie" ? movieCategories : tab === "series" ? seriesCategories : liveCategories;
+  const featuredList = tab === "series" ? series : (tab === "movie" ? movies : (movies.length ? movies : live));
+  const featuredItem = featuredList.length ? featuredList[heroIndex % featuredList.length] : null;
+  const featuredKind: MediaKind = tab === "series" ? "series" : (tab === "movie" || movies.length ? "movie" : "live");
+  const heroArtwork = featuredItem ? normalizeArtworkUrl(featuredItem.cover || featuredItem.stream_icon) : undefined;
+  useEffect(() => { setHeroImageFailed(false); }, [heroArtwork]);
   const filtered = useMemo(() => activeList.filter((item) => {
     const matchesSearch = !search.trim() || item.name?.toLowerCase().includes(search.trim().toLowerCase());
     const matchesCategory = category === "all" || String(item.category_id ?? "") === category;
@@ -299,8 +364,17 @@ export default function App() {
     try { await storageSet(FAVORITES_KEY, JSON.stringify(next)); } catch { /* Favorites are best effort. */ }
   };
 
+  const rememberRecentlyWatched = async (item: MediaItem, kind: MediaKind, displayName?: string) => {
+    const key = `${kind}:${item.stream_id ?? item.id ?? item.series_id ?? item.name}`;
+    const record = { ...item, name: displayName || item.name, _agyashKey: key, _agyashKind: kind };
+    const next = [record, ...recentlyWatched.filter((entry) => entry._agyashKey !== key)].slice(0, 12);
+    setRecentlyWatched(next);
+    try { await storageSet(RECENT_KEY, JSON.stringify(next)); } catch { /* Viewing history is best effort. */ }
+  };
+
   const playItem = async (item: MediaItem, kind: MediaKind) => {
     if (kind !== "series") {
+      void rememberRecentlyWatched(item, kind);
       setPlaying({ uri: streamUrl(kind, item, username.trim(), password), title: item.name });
       return;
     }
@@ -353,7 +427,14 @@ export default function App() {
       <StatusBar barStyle="light-content" backgroundColor="#08090D" />
       <View style={[styles.topBar, compactLayout && styles.mobileTopBar]}>
         <Logo />
+        {!compactLayout && <View style={styles.desktopNav}>
+          {NAV_ITEMS.map((item) => <Pressable key={item.key} onPress={() => { setTab(item.key); setCategory("all"); setSearch(""); setEpisodePicker(null); setHeroIndex(0); }} style={({ focused }) => [styles.desktopNavButton, tab === item.key && styles.desktopNavButtonActive, focused && styles.focused]}>
+            <Text style={[styles.desktopNavIcon, tab === item.key && styles.desktopNavTextActive]}>{item.icon}</Text>
+            <Text style={[styles.desktopNavLabel, tab === item.key && styles.desktopNavTextActive]}>{item.label}</Text>
+          </Pressable>)}
+        </View>}
         <View style={styles.topBarActions}>
+          {!compactLayout && <View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput value={search} onChangeText={setSearch} placeholder="Search channels & titles…" placeholderTextColor="#777988" style={styles.searchInput}/>{!!search && <Pressable onPress={() => setSearch("")}><Text style={styles.clearSearch}>×</Text></Pressable>}</View>}
           <View style={styles.accountBadge}><View style={styles.onlineDot}/><Text style={styles.accountBadgeText}>CONNECTED</Text></View>
           <Pressable onPress={() => setAccountOpen((v) => !v)} style={styles.avatarButton}><Text style={styles.avatarLetter}>{username.slice(0,1).toUpperCase()}</Text></Pressable>
         </View>
@@ -381,15 +462,56 @@ export default function App() {
         {!compactLayout && (
           <View style={styles.sidebar}>
             <Text style={styles.navCaption}>DISCOVER</Text>
-            {NAV_ITEMS.map((item) => <Pressable key={item.key} onPress={() => { setTab(item.key); setCategory("all"); setSearch(""); setEpisodePicker(null); }} style={({ focused }) => [styles.navButton, tab === item.key && styles.navButtonActive, focused && styles.focused]}><Text style={[styles.navIcon, tab === item.key && styles.navTextActive]}>{item.icon}</Text><Text style={[styles.navLabel, tab === item.key && styles.navTextActive]}>{item.label}</Text></Pressable>)}
+            {NAV_ITEMS.map((item) => <Pressable key={item.key} onPress={() => { setTab(item.key); setCategory("all"); setSearch(""); setEpisodePicker(null); setHeroIndex(0); }} style={({ focused }) => [styles.navButton, tab === item.key && styles.navButtonActive, focused && styles.focused]}><Text style={[styles.navIcon, tab === item.key && styles.navTextActive]}>{item.icon}</Text><Text style={[styles.navLabel, tab === item.key && styles.navTextActive]}>{item.label}</Text></Pressable>)}
+            {activeCategories.length > 0 && tab !== "mylist" && <View style={styles.sidebarCategoryBlock}>
+              <Text style={styles.sidebarCategoryTitle}>YOUR CATEGORIES</Text>
+              <ScrollView style={styles.sidebarCategoryScroll} showsVerticalScrollIndicator={false}>
+                <Pressable onPress={() => setCategory("all")} style={[styles.sidebarCategoryButton, category === "all" && styles.sidebarCategoryButtonActive]}>
+                  <Text style={[styles.sidebarCategoryText, category === "all" && styles.sidebarCategoryTextActive]}>All {title}</Text>
+                  <Text style={styles.sidebarCategoryCount}>{activeList.length.toLocaleString()}</Text>
+                </Pressable>
+                {activeCategories.slice(0, 30).map((cat) => <Pressable key={String(cat.category_id)} onPress={() => setCategory(String(cat.category_id))} style={[styles.sidebarCategoryButton, category === String(cat.category_id) && styles.sidebarCategoryButtonActive]}>
+                  <Text style={[styles.sidebarCategoryText, category === String(cat.category_id) && styles.sidebarCategoryTextActive]} numberOfLines={1}>{cat.category_name}</Text>
+                </Pressable>)}
+              </ScrollView>
+            </View>}
             <View style={styles.sidebarFooter}><View style={styles.sidebarDivider}/><Text style={styles.sidebarNote}>Made for your screen.</Text><Text style={styles.sidebarBrand}>AGYASHtv</Text></View>
           </View>
         )}
         <View style={styles.contentPane}>
           <ScrollView contentContainerStyle={[styles.contentScroll, compactLayout && styles.mobileContentScroll]} showsVerticalScrollIndicator={false}>
-            {tab !== "mylist" && <View style={styles.heroBanner}><View style={styles.heroCircle}/><Text style={styles.heroEyebrow}>STREAM YOUR WAY</Text><Text style={styles.heroTitle}>A world of entertainment.</Text><Text style={styles.heroDescription}>Live channels, films and series — all in one place.</Text><View style={styles.heroChipRow}><Text style={styles.heroChip}>✦ LIVE</Text><Text style={styles.heroChip}>FILMS</Text><Text style={styles.heroChip}>SERIES</Text></View></View>}
-            <View style={styles.sectionHeading}><View><Text style={styles.sectionTitle}>{title}</Text><Text style={styles.sectionSub}>{loadingLibrary ? "Loading your library…" : `${filtered.length.toLocaleString()} titles available`}</Text></View><View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput value={search} onChangeText={setSearch} placeholder="Search titles…" placeholderTextColor="#777988" style={styles.searchInput}/>{!!search && <Pressable onPress={() => setSearch("")}><Text style={styles.clearSearch}>×</Text></Pressable>}</View></View>
-            {tab !== "mylist" && activeCategories.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.categoryRow}><Pressable onPress={() => setCategory("all")} style={[styles.categoryChip, category === "all" && styles.categoryChipActive]}><Text style={[styles.categoryText, category === "all" && styles.categoryTextActive]}>All</Text></Pressable>{activeCategories.map((cat) => <Pressable key={String(cat.category_id)} onPress={() => setCategory(String(cat.category_id))} style={[styles.categoryChip, category === String(cat.category_id) && styles.categoryChipActive]}><Text style={[styles.categoryText, category === String(cat.category_id) && styles.categoryTextActive]}>{cat.category_name}</Text></Pressable>)}</ScrollView>}
+            {tab !== "mylist" && <View style={styles.heroBanner}>
+              {heroArtwork && !heroImageFailed && <Image source={{ uri: heroArtwork }} style={styles.heroImage} resizeMode="cover" onError={() => setHeroImageFailed(true)}/>}
+              <View style={styles.heroScrim}/>
+              <View style={styles.heroContent}>
+                <Text style={styles.heroEyebrow}>{featuredItem ? (featuredKind === "live" ? "NOW STREAMING" : "FEATURED ON AGYASHtv") : "STREAM YOUR WAY"}</Text>
+                <Text style={styles.heroTitle} numberOfLines={2}>{featuredItem?.name || "A world of entertainment."}</Text>
+                <Text style={styles.heroMeta}>{featuredItem?.category_name || (featuredKind === "live" ? "LIVE TV" : featuredKind === "series" ? "TV SERIES" : "MOVIE")}  ·  AGYASHtv</Text>
+                <Text style={styles.heroDescription} numberOfLines={3}>{featuredItem?.plot || "Discover live channels, blockbuster films and your favourite series — all in one place."}</Text>
+                <View style={styles.heroActions}>
+                  {featuredItem && <Pressable onPress={() => playItem(featuredItem, featuredKind)} style={({ pressed }) => [styles.heroPlayButton, pressed && styles.pressed]}><Text style={styles.heroPlayText}>▶  Play now</Text></Pressable>}
+                  <View style={styles.heroChipRow}><Text style={styles.heroChip}>✦ LIVE</Text><Text style={styles.heroChip}>FILMS</Text><Text style={styles.heroChip}>SERIES</Text></View>
+                </View>
+              </View>
+              {featuredList.length > 1 && <View style={styles.heroControls}>
+                <Pressable onPress={() => setHeroIndex((value) => (value - 1 + featuredList.length) % featuredList.length)} style={styles.heroArrow}><Text style={styles.heroArrowText}>‹</Text></Pressable>
+                <Pressable onPress={() => setHeroIndex((value) => (value + 1) % featuredList.length)} style={styles.heroArrow}><Text style={styles.heroArrowText}>›</Text></Pressable>
+              </View>}
+              {featuredList.length > 1 && <View style={styles.heroDots}>{featuredList.slice(0, 5).map((_item, index) => <Pressable key={index} onPress={() => setHeroIndex(index)} style={[styles.heroDot, index === heroIndex % featuredList.length && styles.heroDotActive]}/>)}</View>}
+            </View>}
+            {recentlyWatched.length > 0 && tab !== "mylist" && <View style={styles.recentSection}>
+              <View style={styles.recentHeader}><View><Text style={styles.recentTitle}>Recently Watched</Text><Text style={styles.sectionSub}>Pick up where you left off</Text></View></View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentRow}>
+                {recentlyWatched.map((item) => {
+                  const kind = (item._agyashKind as MediaKind) || "live";
+                  const key = String(item._agyashKey || `${kind}:${item.stream_id ?? item.name}`);
+                  const saved = favorites.some((entry) => entry._agyashKey === key);
+                  return <View key={key} style={styles.recentCardWrap}><MediaCard item={item} kind={kind} compact saved={saved} onPress={() => playItem(item, kind)} onToggleSaved={() => toggleFavorite(item, kind)}/></View>;
+                })}
+              </ScrollView>
+            </View>}
+            <View style={styles.sectionHeading}><View><Text style={styles.sectionTitle}>{title}</Text><Text style={styles.sectionSub}>{loadingLibrary ? "Loading your library…" : `${filtered.length.toLocaleString()} titles available`}</Text></View>{compactLayout && <View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput value={search} onChangeText={setSearch} placeholder="Search titles…" placeholderTextColor="#777988" style={styles.searchInput}/>{!!search && <Pressable onPress={() => setSearch("")}><Text style={styles.clearSearch}>×</Text></Pressable>}</View>}</View>
+            {compactLayout && tab !== "mylist" && activeCategories.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.categoryRow}><Pressable onPress={() => setCategory("all")} style={[styles.categoryChip, category === "all" && styles.categoryChipActive]}><Text style={[styles.categoryText, category === "all" && styles.categoryTextActive]}>All</Text></Pressable>{activeCategories.map((cat) => <Pressable key={String(cat.category_id)} onPress={() => setCategory(String(cat.category_id))} style={[styles.categoryChip, category === String(cat.category_id) && styles.categoryChipActive]}><Text style={[styles.categoryText, category === String(cat.category_id) && styles.categoryTextActive]}>{cat.category_name}</Text></Pressable>)}</ScrollView>}
             {!!error && <View style={styles.inlineError}><Text style={styles.inlineErrorText}>{error}</Text><Pressable onPress={() => setError("")}><Text style={styles.clearSearch}>×</Text></Pressable></View>}
             {loadingLibrary && !activeList.length ? <View style={styles.loadingBox}><ActivityIndicator size="large" color="#A99BFF"/><Text style={styles.loadingText}>Preparing your library…</Text></View> : filtered.length === 0 ? <View style={styles.emptyBox}><Text style={styles.emptyGlyph}>{tab === "mylist" ? "♡" : "⌕"}</Text><Text style={styles.emptyTitle}>{tab === "mylist" ? "Your list is waiting" : "Nothing to show just yet"}</Text><Text style={styles.emptyText}>{tab === "mylist" ? "Tap the heart on any title to save it here." : search ? "Try another title or clear your search." : "Check your provider account or try another category."}</Text></View> : <View style={styles.grid}>{filtered.map((item) => {
               const itemKind = tab === "mylist" ? ((item._agyashKind as MediaKind) || "live") : currentKind;
@@ -401,7 +523,7 @@ export default function App() {
           </ScrollView>
         </View>
       </View>
-      {episodePicker && <View style={styles.episodeBackdrop}><View style={styles.episodePanel}><View style={styles.episodeHeader}><View style={{flex:1}}><Text style={styles.episodeEyebrow}>SERIES EPISODES</Text><Text style={styles.episodeTitle} numberOfLines={1}>{episodePicker.series.name}</Text></View><Pressable onPress={() => setEpisodePicker(null)} style={styles.closeButton}><Text style={styles.closeText}>✕</Text></Pressable></View><FlatList data={episodePicker.episodes} keyExtractor={(episode, index) => String(episode.id || index)} renderItem={({item,index}) => <Pressable onPress={() => {setEpisodePicker(null); setPlaying({uri:streamUrl("series",item,username.trim(),password),title:`${episodePicker.series.name} · ${item.title || item.name || `Episode ${index+1}`}`});}} style={styles.episodeRow}><View style={styles.episodePlay}><Text style={styles.episodePlayGlyph}>▶</Text></View><View style={{flex:1}}><Text style={styles.episodeName}>{item.title || item.name || `Episode ${index+1}`}</Text><Text style={styles.episodeMeta}>Season {item.season || "—"} · Episode {item.episode_num || index+1}</Text></View><Text style={styles.episodeChevron}>›</Text></Pressable>} /></View></View>}
+      {episodePicker && <View style={styles.episodeBackdrop}><View style={styles.episodePanel}><View style={styles.episodeHeader}><View style={{flex:1}}><Text style={styles.episodeEyebrow}>SERIES EPISODES</Text><Text style={styles.episodeTitle} numberOfLines={1}>{episodePicker.series.name}</Text></View><Pressable onPress={() => setEpisodePicker(null)} style={styles.closeButton}><Text style={styles.closeText}>✕</Text></Pressable></View><FlatList data={episodePicker.episodes} keyExtractor={(episode, index) => String(episode.id || index)} renderItem={({item,index}) => <Pressable onPress={() => {const episodeTitle=`${episodePicker.series.name} · ${item.title || item.name || `Episode ${index+1}`}`;void rememberRecentlyWatched(item,"series",episodeTitle);setEpisodePicker(null);setPlaying({uri:streamUrl("series",item,username.trim(),password),title:episodeTitle});}} style={styles.episodeRow}><View style={styles.episodePlay}><Text style={styles.episodePlayGlyph}>▶</Text></View><View style={{flex:1}}><Text style={styles.episodeName}>{item.title || item.name || `Episode ${index+1}`}</Text><Text style={styles.episodeMeta}>Season {item.season || "—"} · Episode {item.episode_num || index+1}</Text></View><Text style={styles.episodeChevron}>›</Text></Pressable>} /></View></View>}
       {playing && <VideoPlayerModal uri={playing.uri} title={playing.title} onClose={() => setPlaying(null)}/>}
     </SafeAreaView>
   );
@@ -435,14 +557,20 @@ const styles = StyleSheet.create({
   focused: { borderColor: "#B9AAFF", borderWidth: 2, opacity: 1 },
   termsText: { color: "#777889", textAlign: "center", fontSize: 10, lineHeight: 16, marginTop: 17 },
   loginFooter: { color: "#777889", fontWeight: "700", fontSize: 10, letterSpacing: 2, marginTop: 25 },
-  topBar: { height: 70, paddingHorizontal: 25, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#23232D" },
-  mobileTopBar: { height: 60, paddingHorizontal: 14 },
+  topBar: { height: 76, paddingHorizontal: 25, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#20212B", backgroundColor: "#090A0F" },
+  desktopNav: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, flex: 1, marginHorizontal: 22 },
+  desktopNavButton: { minHeight: 38, paddingHorizontal: 13, borderRadius: 9, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, backgroundColor: "transparent" },
+  desktopNavButtonActive: { backgroundColor: "#242633", borderWidth: 1, borderColor: "#383A4B" },
+  desktopNavIcon: { color: "#8D8FA1", fontSize: 14 },
+  desktopNavLabel: { color: "#C0C1CD", fontSize: 11, fontWeight: "700" },
+  desktopNavTextActive: { color: "#FFFFFF" },
   mobileNavWrap: { borderBottomWidth: 1, borderBottomColor: "#23232D", backgroundColor: "#0B0C12", maxHeight: 60 },
   mobileNav: { paddingHorizontal: 12, paddingVertical: 9, gap: 7, alignItems: "center" },
   mobileNavButton: { minHeight: 39, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, paddingHorizontal: 13, paddingVertical: 8, borderRadius: 10, backgroundColor: "#14151D" },
   mobileNavIcon: { color: "#89899A", fontSize: 16 },
   mobileNavLabel: { color: "#A7A7B8", fontSize: 11, fontWeight: "700" },
   mobileContentScroll: { paddingHorizontal: 14, paddingTop: 16 },
+  mobileTopBar: { height: 60, paddingHorizontal: 14 },
   topBarActions: { flexDirection: "row", alignItems: "center", gap: 16 },
   accountBadge: { flexDirection: "row", alignItems: "center", gap: 7, backgroundColor: "#151A1B", borderColor: "#293638", borderWidth: 1, borderRadius: 20, paddingHorizontal: 11, paddingVertical: 7 },
   onlineDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: "#70E2A0" },
@@ -455,28 +583,54 @@ const styles = StyleSheet.create({
   logoutButton: { backgroundColor: "#302333", padding: 9, borderRadius: 8, alignItems: "center", marginTop: 13 },
   logoutText: { color: "#FFB2BC", fontSize: 12, fontWeight: "800" },
   mainLayout: { flex: 1, flexDirection: "row" },
-  sidebar: { width: 190, paddingHorizontal: 14, paddingTop: 27, borderRightWidth: 1, borderRightColor: "#23232D", backgroundColor: "#0B0C12" },
+  sidebar: { width: 224, paddingHorizontal: 14, paddingTop: 27, borderRightWidth: 1, borderRightColor: "#20212B", backgroundColor: "#0B0D13" },
   navCaption: { color: "#68697B", fontSize: 9, letterSpacing: 1.8, fontWeight: "800", marginHorizontal: 13, marginBottom: 17 },
   navButton: { height: 45, borderRadius: 11, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 5 },
   navButtonActive: { backgroundColor: "#25213B" },
   navIcon: { color: "#89899A", fontSize: 19, width: 22, textAlign: "center" },
   navLabel: { color: "#A7A7B8", fontWeight: "600", fontSize: 12 },
   navTextActive: { color: "#C4BAFF", fontWeight: "800" },
+  sidebarCategoryBlock: { flex: 1, minHeight: 130, marginTop: 26 },
+  sidebarCategoryTitle: { color: "#686B7D", fontSize: 9, letterSpacing: 1.6, fontWeight: "900", marginHorizontal: 12, marginBottom: 10 },
+  sidebarCategoryScroll: { flex: 1 },
+  sidebarCategoryButton: { minHeight: 36, paddingHorizontal: 12, borderRadius: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 3 },
+  sidebarCategoryButtonActive: { backgroundColor: "#191B28" },
+  sidebarCategoryText: { color: "#9294A4", fontSize: 10, fontWeight: "600", flex: 1 },
+  sidebarCategoryTextActive: { color: "#D6D1FF", fontWeight: "800" },
+  sidebarCategoryCount: { color: "#686B7D", fontSize: 9, fontWeight: "700" },
   sidebarFooter: { marginTop: "auto", marginBottom: 25 },
   sidebarDivider: { height: 1, backgroundColor: "#262632", marginBottom: 17 },
   sidebarNote: { color: "#68697B", fontSize: 10 },
   sidebarBrand: { color: "#A99BFF", fontWeight: "800", fontSize: 12, marginTop: 6, letterSpacing: 0.5 },
   contentPane: { flex: 1, minWidth: 0 },
-  contentScroll: { paddingHorizontal: 26, paddingTop: 23 },
-  heroBanner: { minHeight: 175, borderRadius: 20, overflow: "hidden", backgroundColor: "#211C3A", paddingVertical: 25, paddingHorizontal: 27, marginBottom: 28, justifyContent: "center" },
-  heroCircle: { position: "absolute", width: 300, height: 300, right: -35, top: -122, borderRadius: 150, borderWidth: 34, borderColor: "#39305E", opacity: 0.8 },
-  heroEyebrow: { color: "#B5A9FF", fontSize: 9, fontWeight: "900", letterSpacing: 2 },
-  heroTitle: { color: "#FFFFFF", fontSize: 27, fontWeight: "900", marginTop: 8 },
-  heroDescription: { color: "#C0BDD4", fontSize: 12, marginTop: 8 },
-  heroChipRow: { flexDirection: "row", gap: 8, marginTop: 15 },
-  heroChip: { color: "#D9D3FF", backgroundColor: "#3C335D", borderRadius: 7, overflow: "hidden", paddingVertical: 6, paddingHorizontal: 10, fontSize: 9, fontWeight: "800", letterSpacing: 0.5 },
+  contentScroll: { paddingHorizontal: 30, paddingTop: 25, paddingBottom: 30 },
+  heroBanner: { minHeight: 355, borderRadius: 23, overflow: "hidden", backgroundColor: "#151927", marginBottom: 34, justifyContent: "center", position: "relative", borderWidth: 1, borderColor: "#272A38" },
+  heroImage: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, width: "100%", height: "100%" },
+  heroScrim: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "#070A13AA" },
+  heroContent: { maxWidth: 690, paddingVertical: 32, paddingHorizontal: 34, zIndex: 1 },
+  heroEyebrow: { color: "#B5D2FF", fontSize: 9, fontWeight: "900", letterSpacing: 2 },
+  heroTitle: { color: "#FFFFFF", fontSize: 38, lineHeight: 45, fontWeight: "900", marginTop: 12, maxWidth: 650 },
+  heroMeta: { color: "#D5D7E2", fontSize: 11, fontWeight: "800", letterSpacing: 0.6, marginTop: 12 },
+  heroDescription: { color: "#E0E1E9", fontSize: 13, lineHeight: 20, marginTop: 13, maxWidth: 520 },
+  heroActions: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 16, marginTop: 22 },
+  heroPlayButton: { minHeight: 44, paddingHorizontal: 23, borderRadius: 9, alignItems: "center", justifyContent: "center", backgroundColor: "#FFFFFF" },
+  heroPlayText: { color: "#12131A", fontSize: 12, fontWeight: "900" },
+  heroChipRow: { flexDirection: "row", gap: 8, alignItems: "center" },
+  heroChip: { color: "#E4EAFB", backgroundColor: "#FFFFFF26", borderRadius: 7, overflow: "hidden", paddingVertical: 7, paddingHorizontal: 11, fontSize: 9, fontWeight: "800", letterSpacing: 0.5 },
+  heroControls: { position: "absolute", right: 18, top: "45%", flexDirection: "row", gap: 8, zIndex: 2 },
+  heroArrow: { width: 38, height: 38, alignItems: "center", justifyContent: "center", borderRadius: 20, backgroundColor: "#10152299", borderWidth: 1, borderColor: "#FFFFFF33" },
+  heroArrowText: { color: "#FFFFFF", fontSize: 24, lineHeight: 27 },
+  heroDots: { position: "absolute", right: 24, bottom: 18, flexDirection: "row", alignItems: "center", gap: 7 },
+  heroDot: { width: 7, height: 7, borderRadius: 5, backgroundColor: "#FFFFFF88" },
+  heroDotActive: { width: 20, backgroundColor: "#38DDF2" },
+  recentSection: { marginBottom: 31 },
+  recentHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
+  recentTitle: { color: "#F6F7FB", fontSize: 19, fontWeight: "900" },
+  recentRow: { gap: 14, paddingBottom: 5 },
+  recentCardWrap: { width: 156 },
+  recentCard: { width: 156 },
   sectionHeading: { flexDirection: "row", gap: 16, justifyContent: "space-between", alignItems: "center", marginBottom: 20 },
-  sectionTitle: { color: "#F8F8FC", fontSize: 22, fontWeight: "900" },
+  sectionTitle: { color: "#F8F8FC", fontSize: 23, fontWeight: "900" },
   sectionSub: { color: "#858697", fontSize: 11, marginTop: 5 },
   searchBox: { width: 250, maxWidth: "48%", height: 41, borderRadius: 10, borderWidth: 1, borderColor: "#2F303D", backgroundColor: "#12131A", paddingHorizontal: 10, flexDirection: "row", alignItems: "center", gap: 8 },
   searchIcon: { color: "#9696A8", fontSize: 22 },
