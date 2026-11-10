@@ -1,5 +1,7 @@
 const { Readable } = require("node:stream");
 const crypto = require("node:crypto");
+const dns = require("node:dns").promises;
+const net = require("node:net");
 
 const ALLOWED_ACTIONS = new Set([
   "get_live_categories",
@@ -125,12 +127,58 @@ function isAllowedTarget(target, base, hosts = allowedStreamHosts(base)) {
     (target.protocol === "http:" && (!target.port || target.port === "80"));
 }
 
-async function fetchAllowedTarget(target, headers, base) {
+function isNonPublicAddress(address) {
+  const value = String(address || "").toLowerCase().split("%")[0];
+  const family = net.isIP(value);
+  if (family === 4) {
+    const [a, b, c] = value.split(".").map(Number);
+    return a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+      (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
+      (a === 203 && b === 0 && c === 113);
+  }
+  if (family === 6) {
+    if (value.startsWith("::ffff:")) {
+      const mapped = value.slice(7);
+      if (net.isIP(mapped) === 4) return isNonPublicAddress(mapped);
+    }
+    const first = parseInt(value.split(":")[0] || "0", 16);
+    return value === "::" || value === "::1" ||
+      (first >= 0xfc00 && first <= 0xfdff) ||
+      (first >= 0xfe80 && first <= 0xfebf) ||
+      first >= 0xff00 ||
+      value.startsWith("2001:db8:");
+  }
+  return true;
+}
+
+async function isSafePublicTarget(target) {
+  if (!target || !["http:", "https:"].includes(target.protocol) || target.username || target.password) return false;
+  const host = target.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return false;
+  const family = net.isIP(host);
+  if (family) return !isNonPublicAddress(host);
+  try {
+    const records = await dns.lookup(host, { all: true, verbatim: true });
+    return records.length > 0 && records.every((record) => !isNonPublicAddress(record.address));
+  } catch {
+    return false;
+  }
+}
+
+async function fetchAllowedTarget(target, headers, base, options = {}) {
   const hosts = allowedStreamHosts(base);
+  const allowPublicRedirects = options.allowPublicRedirects === true;
   let current = new URL(target);
   for (let redirectCount = 0; redirectCount <= 5; redirectCount++) {
-    if (!isAllowedTarget(current, base, hosts)) {
-      throw new Error("Provider stream host is not allow-listed.");
+    const providerAllowed = isAllowedTarget(current, base, hosts);
+    const cdnAllowed = allowPublicRedirects && await isSafePublicTarget(current);
+    if (!providerAllowed && !cdnAllowed) {
+      throw new Error("Provider redirected to a blocked or unreachable stream host.");
     }
     const response = await fetch(current, { headers, redirect: "manual" });
     if (![301, 302, 303, 307, 308].includes(response.status)) {
@@ -245,8 +293,8 @@ module.exports = async function handler(req, res) {
     } else if (mode === "remote") {
       target = readTargetToken(q.target);
       if (!target) return res.status(400).json({ error: "The stream link is invalid or expired. Please reopen the stream." });
-      if (!isAllowedTarget(target, base)) {
-        return res.status(403).json({ error: "Blocked stream target. Configure an allowed provider/CDN host if required." });
+      if (!await isSafePublicTarget(target)) {
+        return res.status(403).json({ error: "The provider returned an unreachable or private stream host." });
       }
     } else {
       return res.status(400).json({ error: "Invalid stream mode." });
@@ -254,7 +302,10 @@ module.exports = async function handler(req, res) {
 
     const headers = { Accept: "*/*" };
     if (req.headers.range) headers.Range = req.headers.range;
-    const fetched = await fetchAllowedTarget(target, headers, base);
+    // IPTV providers commonly redirect stream requests to public CDN hosts.
+    // The encrypted remote-target token prevents arbitrary client URLs; additionally
+    // resolve and reject private/local destinations before following any redirect.
+    const fetched = await fetchAllowedTarget(target, headers, base, { allowPublicRedirects: true });
     const upstream = fetched.response;
     target = fetched.url;
     const type = upstream.headers.get("content-type") || "";
@@ -289,6 +340,9 @@ module.exports = async function handler(req, res) {
     if (message === "XTREAM_SESSION_SECRET is not configured.") {
       return res.status(503).json({ error: "Web sessions are not configured. Add XTREAM_SESSION_SECRET in Vercel." });
     }
-    return res.status(500).json({ error: "Unable to contact your IPTV provider. Check its configuration and try again." });
+    if (process.env.AGYASHTV_LOCAL_DESKTOP === "1") {
+      return res.status(502).json({ error: `IPTV stream request failed: ${message}` });
+    }
+    return res.status(502).json({ error: "Unable to contact your IPTV provider. Check its configuration and try again." });
   }
 };
