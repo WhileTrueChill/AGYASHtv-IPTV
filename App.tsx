@@ -81,6 +81,20 @@ function normalizeArtworkUrl(value?: string): string | undefined {
 
   if (!["http:", "https:"].includes(parsed.protocol)) return undefined;
 
+  // These image hosts repeatedly return forbidden, invalid-certificate, or dead
+  // links in the provider catalog. Skip them and let the card show its fallback.
+  const blockedArtworkHosts = new Set([
+    "i.imgur.com",
+    "imgur.com",
+    "seeklogo.com",
+    "static.wikia.nocookie.net",
+    "encrypted-tbn0.gstatic.com",
+    "eastgatemall.lk",
+    "s3.i3ns.net",
+    "xplatinmedia.com",
+  ]);
+  if (blockedArtworkHosts.has(parsed.hostname.toLowerCase())) return undefined;
+
   if (parsed.hostname.toLowerCase() === "plexflix.to" &&
       parsed.pathname.toLowerCase().startsWith("/plexflix.to/") &&
       resolvedProviderBase) {
@@ -153,41 +167,89 @@ function streamUrl(kind: MediaKind, item: MediaItem | Episode, username: string,
 
 function WebVideoPlayerModal({ uri, title, onClose }: { uri: string; title: string; onClose: () => void }) {
   const videoRef = useRef<any>(null);
+  const [playerError, setPlayerError] = useState("");
+  const [retryKey, setRetryKey] = useState(0);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     let hls: any = null;
+    let disposed = false;
+    setPlayerError("");
+
+    const showVideoError = () => {
+      if (disposed) return;
+      const mediaError = video.error;
+      const code = mediaError?.code;
+      const detail = mediaError?.message || (code ? `Media error ${code}` : "The video source could not be opened.");
+      setPlayerError(detail);
+    };
+    const clearVideoError = () => { if (!disposed) setPlayerError(""); };
+    video.addEventListener?.("error", showVideoError);
+    video.addEventListener?.("playing", clearVideoError);
+
     const isHls = uri.toLowerCase().includes(".m3u8") || uri.includes("ext=m3u8");
     if (isHls) {
-      const hlsModule = require("hls.js");
-      const HlsConstructor = hlsModule.default || hlsModule;
-      if (HlsConstructor.isSupported()) {
-        hls = new HlsConstructor({
-        enableWorker: true,
-        xhrSetup: (xhr: XMLHttpRequest) => { xhr.withCredentials = true; },
-      });
-        hls.loadSource(uri);
-        hls.attachMedia(video);
-      } else {
-        video.src = uri;
+      try {
+        const hlsModule = require("hls.js");
+        const HlsConstructor = hlsModule.default || hlsModule;
+        if (HlsConstructor.isSupported()) {
+          hls = new HlsConstructor({
+            enableWorker: true,
+            xhrSetup: (xhr: XMLHttpRequest) => { xhr.withCredentials = true; },
+          });
+          hls.on(HlsConstructor.Events.ERROR, (_event: string, data: any) => {
+            if (disposed || !data?.fatal) return;
+            const status = Number(data?.response?.code || data?.networkDetails?.status || 0);
+            const detail = status
+              ? `Stream server returned HTTP ${status}. Check the IPTV provider/CDN and try again.`
+              : `Stream could not load (${String(data?.details || "network error")}). Check the provider server and internet connection.`;
+            setPlayerError(detail);
+          });
+          hls.loadSource(uri);
+          hls.attachMedia(video);
+        } else {
+          video.src = uri;
+        }
+      } catch (error) {
+        setPlayerError(error instanceof Error ? error.message : "The HLS video player could not start.");
       }
     } else {
       video.src = uri;
     }
+
     const play = video.play?.();
-    if (play && typeof play.catch === "function") play.catch(() => {});
-    return () => { hls?.destroy(); video.pause?.(); video.removeAttribute?.("src"); };
-  }, [uri]);
+    if (play && typeof play.catch === "function") {
+      play.catch(() => { /* Browser may require the viewer to press Play. */ });
+    }
+    return () => {
+      disposed = true;
+      video.removeEventListener?.("error", showVideoError);
+      video.removeEventListener?.("playing", clearVideoError);
+      hls?.destroy();
+      video.pause?.();
+      video.removeAttribute?.("src");
+      video.load?.();
+    };
+  }, [uri, retryKey]);
+
   return (
     <View style={styles.playerBackdrop}>
       <View style={styles.playerHeader}>
         <Text style={styles.playerTitle} numberOfLines={1}>{title}</Text>
-        <Pressable onPress={onClose} style={styles.closeButton} accessibilityLabel="Close player"><Text style={styles.closeText}>✕</Text></Pressable>
+        <Pressable onPress={onClose} style={styles.closeButton} accessibilityRole="button" accessibilityLabel="Close player"><Text style={styles.closeText}>✕</Text></Pressable>
       </View>
       {React.createElement("video" as any, {
         ref: videoRef, controls: true, autoPlay: true, playsInline: true,
         style: { width: "100%", height: "calc(100% - 62px)", marginTop: 12, borderRadius: 10, backgroundColor: "#000" }
       })}
+      {!!playerError && <View style={styles.playerErrorCard}>
+        <Text style={styles.playerErrorText}>{playerError}</Text>
+        <View style={styles.playerErrorActions}>
+          <Pressable onPress={() => setRetryKey((value) => value + 1)} style={styles.playerRetryButton} accessibilityRole="button"><Text style={styles.playerRetryText}>Try again</Text></Pressable>
+          <Pressable onPress={onClose} style={styles.playerCloseButton} accessibilityRole="button"><Text style={styles.playerRetryText}>Close</Text></Pressable>
+        </View>
+      </View>}
     </View>
   );
 }
@@ -481,8 +543,8 @@ export default function App() {
         <View style={styles.contentPane}>
           <ScrollView contentContainerStyle={[styles.contentScroll, compactLayout && styles.mobileContentScroll]} showsVerticalScrollIndicator={false}>
             {tab !== "mylist" && <View style={styles.heroBanner}>
-              {heroArtwork && !heroImageFailed && <Image source={{ uri: heroArtwork }} style={styles.heroImage} resizeMode="cover" onError={() => setHeroImageFailed(true)}/>}
-              <View style={styles.heroScrim}/>
+              {heroArtwork && !heroImageFailed && <Image source={{ uri: heroArtwork }} style={styles.heroImage} resizeMode="cover" pointerEvents="none" onError={() => setHeroImageFailed(true)}/>}
+              <View style={styles.heroScrim} pointerEvents="none"/>
               <View style={styles.heroContent}>
                 <Text style={styles.heroEyebrow}>{featuredItem ? (featuredKind === "live" ? "NOW STREAMING" : "FEATURED ON AGYASHtv") : "STREAM YOUR WAY"}</Text>
                 <Text style={styles.heroTitle} numberOfLines={2}>{featuredItem?.name || "A world of entertainment."}</Text>
@@ -674,6 +736,12 @@ const styles = StyleSheet.create({
   closeButton: { width: 39, height: 39, alignItems: "center", justifyContent: "center", backgroundColor: "#252633", borderRadius: 20 },
   closeText: { color: "#F5F5FC", fontSize: 18, fontWeight: "800" },
   video: { flex: 1, width: "100%", marginTop: 12, borderRadius: 10, backgroundColor: "#000" },
+  playerErrorCard: { position: "absolute", left: 24, right: 24, bottom: 62, padding: 17, borderRadius: 13, backgroundColor: "#171923F2", borderWidth: 1, borderColor: "#6B3443", alignItems: "center", gap: 12 },
+  playerErrorText: { color: "#FFD4DA", fontSize: 12, lineHeight: 18, textAlign: "center" },
+  playerErrorActions: { flexDirection: "row", justifyContent: "center", gap: 10 },
+  playerRetryButton: { paddingVertical: 10, paddingHorizontal: 18, borderRadius: 9, backgroundColor: "#A99BFF" },
+  playerCloseButton: { paddingVertical: 10, paddingHorizontal: 18, borderRadius: 9, backgroundColor: "#373947" },
+  playerRetryText: { color: "#FFFFFF", fontSize: 12, fontWeight: "800" },
   episodeBackdrop: { position: "absolute", zIndex: 150, top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "#000B", alignItems: "center", justifyContent: "center", padding: 20 },
   episodePanel: { maxWidth: 650, width: "100%", maxHeight: "85%", backgroundColor: "#151620", borderWidth: 1, borderColor: "#393746", borderRadius: 18, padding: 18, flex: 1 },
   episodeHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 10 },
