@@ -299,6 +299,9 @@ export default function App() {
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [loadingLibrary, setLoadingLibrary] = useState(false);
+  const loadedKindsRef = useRef<Set<MediaKind>>(new Set());
+  const loadingKindsRef = useRef<Set<MediaKind>>(new Set());
+  const [visibleCount, setVisibleCount] = useState(48);
   const [error, setError] = useState("");
   const [tab, setTab] = useState<"live" | "movie" | "series" | "mylist">("live");
   const [search, setSearch] = useState("");
@@ -335,20 +338,63 @@ export default function App() {
     })();
   }, []);
 
-  const loadLibrary = async (base: string, user: string, pass: string) => {
+  const loadLibrary = async (base: string, user: string, pass: string, kind: MediaKind) => {
+    if (loadedKindsRef.current.has(kind) || loadingKindsRef.current.has(kind)) return;
+    loadingKindsRef.current.add(kind);
     setLoadingLibrary(true);
-    const actions = [
-      ["get_live_categories", setLiveCategories], ["get_live_streams", setLive],
-      ["get_vod_categories", setMovieCategories], ["get_vod_streams", setMovies],
-      ["get_series_categories", setSeriesCategories], ["get_series", setSeries],
-    ] as const;
-    const results = await Promise.allSettled(actions.map(([action]) => apiRequest<any[]>(base, user, pass, action)));
-    results.forEach((result, index) => {
-      const setter = actions[index][1] as (data: any[]) => void;
-      if (result.status === "fulfilled" && Array.isArray(result.value)) setter(result.value);
-      else setter([]);
-    });
-    setLoadingLibrary(false);
+
+    const config = kind === "live"
+      ? { categories: "get_live_categories", items: "get_live_streams", setCategories: setLiveCategories, setItems: setLive, label: "Live TV" }
+      : kind === "movie"
+        ? { categories: "get_vod_categories", items: "get_vod_streams", setCategories: setMovieCategories, setItems: setMovies, label: "Movies" }
+        : { categories: "get_series_categories", items: "get_series", setCategories: setSeriesCategories, setItems: setSeries, label: "Series" };
+
+    try {
+      const [categoryResult, itemResult] = await Promise.allSettled([
+        apiRequest<any[]>(base, user, pass, config.categories),
+        apiRequest<any[]>(base, user, pass, config.items),
+      ]);
+      const failures: string[] = [];
+
+      if (categoryResult.status === "fulfilled" && Array.isArray(categoryResult.value)) {
+        config.setCategories(categoryResult.value);
+      } else {
+        config.setCategories([]);
+        failures.push("categories");
+      }
+
+      if (itemResult.status === "fulfilled" && Array.isArray(itemResult.value)) {
+        config.setItems(itemResult.value);
+      } else {
+        config.setItems([]);
+        failures.push("titles");
+      }
+
+      if (failures.length === 0) {
+        loadedKindsRef.current.add(kind);
+      } else {
+        setError(`${config.label} could not load its ${failures.join(" and ")}. Check the IPTV provider and try this tab again.`);
+      }
+    } finally {
+      loadingKindsRef.current.delete(kind);
+      setLoadingLibrary(loadingKindsRef.current.size > 0);
+    }
+  };
+
+  const changeTab = (nextTab: "live" | "movie" | "series" | "mylist") => {
+    setTab(nextTab);
+    setCategory("all");
+    setSearch("");
+    setVisibleCount(48);
+    setEpisodePicker(null);
+    setHeroIndex(0);
+    setError("");
+    if (nextTab !== "mylist") {
+      const base = resolvedProviderBase || providerUrl.trim();
+      if (base && username.trim() && password) {
+        void loadLibrary(base, username.trim(), password, nextTab);
+      }
+    }
   };
 
   const login = async () => {
@@ -365,13 +411,15 @@ export default function App() {
       if (!result?.user_info || Number(result.user_info.auth) !== 1) {
         throw new Error("Login failed. Check your username/password or contact your IPTV provider.");
       }
+      loadedKindsRef.current.clear();
       setUserInfo(result.user_info);
       setSignedIn(true);
       setTab("live");
       setCategory("all");
+      setVisibleCount(48);
       if (remember) await storageSet(CREDENTIAL_KEY, JSON.stringify({ providerUrl: normalizedBase, username: user, password: pass }));
       else await storageRemove(CREDENTIAL_KEY);
-      await loadLibrary(normalizedBase, user, pass);
+      await loadLibrary(normalizedBase, user, pass, "live");
     } catch (e) {
       setSignedIn(false);
       const message = e instanceof Error ? e.message : readableApiError(e, "Login failed. Try again.");
@@ -394,8 +442,13 @@ export default function App() {
         });
       } catch { /* Local sign-out still proceeds if the server is unreachable. */ }
     }
+    loadedKindsRef.current.clear();
+    loadingKindsRef.current.clear();
+    setLoadingLibrary(false);
     setSignedIn(false); setUserInfo(null); setLive([]); setMovies([]); setSeries([]);
+    setLiveCategories([]); setMovieCategories([]); setSeriesCategories([]);
     setSearch(""); setError(""); setAccountOpen(false); setEpisodePicker(null); setPlaying(null);
+    setRecentlyWatched([]);
     await storageRemove(CREDENTIAL_KEY);
   };
 
@@ -417,6 +470,8 @@ export default function App() {
     const matchesCategory = category === "all" || String(item.category_id ?? "") === category;
     return matchesSearch && matchesCategory;
   }), [activeList, search, category]);
+  const visibleItems = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount]);
+  useEffect(() => { setVisibleCount(48); }, [tab, category, search]);
 
   const toggleFavorite = async (item: MediaItem, kind: MediaKind) => {
     const key = `${kind}:${item.stream_id ?? item.series_id ?? item.name}`;
@@ -435,20 +490,42 @@ export default function App() {
   };
 
   const playItem = async (item: MediaItem, kind: MediaKind) => {
+    setError("");
     if (kind !== "series") {
+      const streamId = item.stream_id ?? item.id;
+      if (streamId == null || String(streamId).trim() === "") {
+        setError(`This ${kind === "movie" ? "movie" : "channel"} has no stream ID from the provider.`);
+        return;
+      }
       void rememberRecentlyWatched(item, kind);
-      setPlaying({ uri: streamUrl(kind, item, username.trim(), password), title: item.name });
+      setPlaying({ uri: streamUrl(kind, { ...item, stream_id: streamId }, username.trim(), password), title: item.name });
       return;
     }
-    setBusy(true); setError("");
+
+    const seriesId = item.series_id ?? item.stream_id ?? item.id;
+    if (seriesId == null || !/^\d+$/.test(String(seriesId))) {
+      setError("This series is missing its provider Series ID. Refresh the Series tab or contact your IPTV provider.");
+      return;
+    }
+    setBusy(true);
     try {
-      const detail = await apiRequest<{ episodes?: Record<string, Episode[]> }>(resolvedProviderBase, username.trim(), password, "get_series_info", { series_id: item.series_id ?? item.stream_id ?? "" });
-      const episodes = Object.values(detail.episodes || {}).flat().sort((a, b) => Number(a.season || 0) - Number(b.season || 0) || Number(a.episode_num || 0) - Number(b.episode_num || 0));
-      if (!episodes.length) { setError("No episodes were returned for this series."); return; }
+      const detail = await apiRequest<{ episodes?: Record<string, Episode[]> | Episode[] }>(
+        resolvedProviderBase || providerUrl.trim(), username.trim(), password, "get_series_info", { series_id: String(seriesId) }
+      );
+      const episodeValue = detail?.episodes;
+      const episodes = (Array.isArray(episodeValue) ? episodeValue : Object.values(episodeValue || {}).flat())
+        .filter((episode): episode is Episode => Boolean(episode && (episode.id ?? episode.stream_id)))
+        .sort((a, b) => Number(a.season || 0) - Number(b.season || 0) || Number(a.episode_num || 0) - Number(b.episode_num || 0));
+      if (!episodes.length) {
+        setError("No episodes came back from the provider for this series.");
+        return;
+      }
       setEpisodePicker({ series: item, episodes });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Unable to load episodes.");
-    } finally { setBusy(false); }
+      setError(e instanceof Error ? e.message : "Unable to load series episodes. Please try again.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const currentKind: MediaKind = tab === "movie" ? "movie" : tab === "series" ? "series" : "live";
@@ -457,7 +534,7 @@ export default function App() {
   if (!signedIn) {
     return (
       <SafeAreaView style={styles.appShell}>
-        <StatusBar barStyle="light-content" backgroundColor="#08090D" />
+        <StatusBar barStyle="light-content" backgroundColor="#080808" />
         <KeyboardAvoidingView style={styles.loginRoot} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.loginGlow} />
           <Logo />
@@ -466,11 +543,11 @@ export default function App() {
             <Text style={styles.loginTitle}>Welcome back.</Text>
             <Text style={styles.loginSubtitle}>Enter your IPTV server details to continue.</Text>
             <Text style={styles.fieldLabel}>SERVER / PORTAL URL</Text>
-            <TextInput value={providerUrl} onChangeText={setProviderUrl} placeholder="https://your-iptv-server.com:8080" placeholderTextColor="#777988" autoCapitalize="none" autoCorrect={false} keyboardType="url" style={styles.input} returnKeyType="next" />
+            <TextInput value={providerUrl} onChangeText={setProviderUrl} placeholder="https://your-iptv-server.com:8080" placeholderTextColor="#777777" autoCapitalize="none" autoCorrect={false} keyboardType="url" style={styles.input} returnKeyType="next" />
             <Text style={styles.fieldLabel}>USERNAME</Text>
-            <TextInput value={username} onChangeText={setUsername} placeholder="Enter username" placeholderTextColor="#777988" autoCapitalize="none" autoCorrect={false} textContentType="username" style={styles.input} returnKeyType="next" />
+            <TextInput value={username} onChangeText={setUsername} placeholder="Enter username" placeholderTextColor="#777777" autoCapitalize="none" autoCorrect={false} textContentType="username" style={styles.input} returnKeyType="next" />
             <Text style={styles.fieldLabel}>PASSWORD</Text>
-            <TextInput value={password} onChangeText={setPassword} placeholder="Enter password" placeholderTextColor="#777988" secureTextEntry autoCapitalize="none" textContentType="password" style={styles.input} returnKeyType="go" onSubmitEditing={login} />
+            <TextInput value={password} onChangeText={setPassword} placeholder="Enter password" placeholderTextColor="#777777" secureTextEntry autoCapitalize="none" textContentType="password" style={styles.input} returnKeyType="go" onSubmitEditing={login} />
             <Pressable onPress={() => setRemember((v) => !v)} style={styles.rememberRow}><View style={[styles.checkbox, remember && styles.checkboxChecked]}>{remember && <Text style={styles.checkboxTick}>✓</Text>}</View><Text style={styles.rememberText}>Remember me on this device</Text></Pressable>
             {!!error && <Text style={styles.errorText}>{error}</Text>}
             <Pressable onPress={login} disabled={busy} style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed, busy && styles.disabledButton]}>
@@ -486,17 +563,17 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.appShell}>
-      <StatusBar barStyle="light-content" backgroundColor="#08090D" />
+      <StatusBar barStyle="light-content" backgroundColor="#080808" />
       <View style={[styles.topBar, compactLayout && styles.mobileTopBar]}>
         <Logo />
         {!compactLayout && <View style={styles.desktopNav}>
-          {NAV_ITEMS.map((item) => <Pressable key={item.key} onPress={() => { setTab(item.key); setCategory("all"); setSearch(""); setEpisodePicker(null); setHeroIndex(0); }} style={({ focused }) => [styles.desktopNavButton, tab === item.key && styles.desktopNavButtonActive, focused && styles.focused]}>
+          {NAV_ITEMS.map((item) => <Pressable key={item.key} onPress={() => changeTab(item.key)} style={({ focused }) => [styles.desktopNavButton, tab === item.key && styles.desktopNavButtonActive, focused && styles.focused]}>
             <Text style={[styles.desktopNavIcon, tab === item.key && styles.desktopNavTextActive]}>{item.icon}</Text>
             <Text style={[styles.desktopNavLabel, tab === item.key && styles.desktopNavTextActive]}>{item.label}</Text>
           </Pressable>)}
         </View>}
         <View style={styles.topBarActions}>
-          {!compactLayout && <View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput value={search} onChangeText={setSearch} placeholder="Search channels & titles…" placeholderTextColor="#777988" style={styles.searchInput}/>{!!search && <Pressable onPress={() => setSearch("")}><Text style={styles.clearSearch}>×</Text></Pressable>}</View>}
+          {!compactLayout && <View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput value={search} onChangeText={setSearch} placeholder="Search channels & titles…" placeholderTextColor="#777777" style={styles.searchInput}/>{!!search && <Pressable onPress={() => setSearch("")}><Text style={styles.clearSearch}>×</Text></Pressable>}</View>}
           <View style={styles.accountBadge}><View style={styles.onlineDot}/><Text style={styles.accountBadgeText}>CONNECTED</Text></View>
           <Pressable onPress={() => setAccountOpen((v) => !v)} style={styles.avatarButton}><Text style={styles.avatarLetter}>{username.slice(0,1).toUpperCase()}</Text></Pressable>
         </View>
@@ -508,7 +585,7 @@ export default function App() {
             {NAV_ITEMS.map((item) => (
               <Pressable
                 key={item.key}
-                onPress={() => { setTab(item.key); setCategory("all"); setSearch(""); setEpisodePicker(null); }}
+                onPress={() => changeTab(item.key)}
                 style={({ focused }) => [styles.mobileNavButton, tab === item.key && styles.navButtonActive, focused && styles.focused]}
                 accessibilityRole="button"
                 accessibilityLabel={item.label}
@@ -521,25 +598,6 @@ export default function App() {
         </View>
       )}
       <View style={styles.mainLayout}>
-        {!compactLayout && (
-          <View style={styles.sidebar}>
-            <Text style={styles.navCaption}>DISCOVER</Text>
-            {NAV_ITEMS.map((item) => <Pressable key={item.key} onPress={() => { setTab(item.key); setCategory("all"); setSearch(""); setEpisodePicker(null); setHeroIndex(0); }} style={({ focused }) => [styles.navButton, tab === item.key && styles.navButtonActive, focused && styles.focused]}><Text style={[styles.navIcon, tab === item.key && styles.navTextActive]}>{item.icon}</Text><Text style={[styles.navLabel, tab === item.key && styles.navTextActive]}>{item.label}</Text></Pressable>)}
-            {activeCategories.length > 0 && tab !== "mylist" && <View style={styles.sidebarCategoryBlock}>
-              <Text style={styles.sidebarCategoryTitle}>YOUR CATEGORIES</Text>
-              <ScrollView style={styles.sidebarCategoryScroll} showsVerticalScrollIndicator={false}>
-                <Pressable onPress={() => setCategory("all")} style={[styles.sidebarCategoryButton, category === "all" && styles.sidebarCategoryButtonActive]}>
-                  <Text style={[styles.sidebarCategoryText, category === "all" && styles.sidebarCategoryTextActive]}>All {title}</Text>
-                  <Text style={styles.sidebarCategoryCount}>{activeList.length.toLocaleString()}</Text>
-                </Pressable>
-                {activeCategories.slice(0, 30).map((cat) => <Pressable key={String(cat.category_id)} onPress={() => setCategory(String(cat.category_id))} style={[styles.sidebarCategoryButton, category === String(cat.category_id) && styles.sidebarCategoryButtonActive]}>
-                  <Text style={[styles.sidebarCategoryText, category === String(cat.category_id) && styles.sidebarCategoryTextActive]} numberOfLines={1}>{cat.category_name}</Text>
-                </Pressable>)}
-              </ScrollView>
-            </View>}
-            <View style={styles.sidebarFooter}><View style={styles.sidebarDivider}/><Text style={styles.sidebarNote}>Made for your screen.</Text><Text style={styles.sidebarBrand}>AGYASHtv</Text></View>
-          </View>
-        )}
         <View style={styles.contentPane}>
           <ScrollView contentContainerStyle={[styles.contentScroll, compactLayout && styles.mobileContentScroll]} showsVerticalScrollIndicator={false}>
             {tab !== "mylist" && <View style={styles.heroBanner}>
@@ -572,19 +630,21 @@ export default function App() {
                 })}
               </ScrollView>
             </View>}
-            <View style={styles.sectionHeading}><View><Text style={styles.sectionTitle}>{title}</Text><Text style={styles.sectionSub}>{loadingLibrary ? "Loading your library…" : `${filtered.length.toLocaleString()} titles available`}</Text></View>{compactLayout && <View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput value={search} onChangeText={setSearch} placeholder="Search titles…" placeholderTextColor="#777988" style={styles.searchInput}/>{!!search && <Pressable onPress={() => setSearch("")}><Text style={styles.clearSearch}>×</Text></Pressable>}</View>}</View>
-            {compactLayout && tab !== "mylist" && activeCategories.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.categoryRow}><Pressable onPress={() => setCategory("all")} style={[styles.categoryChip, category === "all" && styles.categoryChipActive]}><Text style={[styles.categoryText, category === "all" && styles.categoryTextActive]}>All</Text></Pressable>{activeCategories.map((cat) => <Pressable key={String(cat.category_id)} onPress={() => setCategory(String(cat.category_id))} style={[styles.categoryChip, category === String(cat.category_id) && styles.categoryChipActive]}><Text style={[styles.categoryText, category === String(cat.category_id) && styles.categoryTextActive]}>{cat.category_name}</Text></Pressable>)}</ScrollView>}
+            <View style={styles.sectionHeading}><View><Text style={styles.sectionTitle}>{title}</Text><Text style={styles.sectionSub}>{loadingLibrary ? "Loading your library…" : `${filtered.length.toLocaleString()} titles available`}</Text></View>{compactLayout && <View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput value={search} onChangeText={setSearch} placeholder="Search titles…" placeholderTextColor="#777777" style={styles.searchInput}/>{!!search && <Pressable onPress={() => setSearch("")}><Text style={styles.clearSearch}>×</Text></Pressable>}</View>}</View>
+            {tab !== "mylist" && activeCategories.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.categoryRow}><Pressable onPress={() => setCategory("all")} style={[styles.categoryChip, category === "all" && styles.categoryChipActive]}><Text style={[styles.categoryText, category === "all" && styles.categoryTextActive]}>All</Text></Pressable>{activeCategories.map((cat) => <Pressable key={String(cat.category_id)} onPress={() => setCategory(String(cat.category_id))} style={[styles.categoryChip, category === String(cat.category_id) && styles.categoryChipActive]}><Text style={[styles.categoryText, category === String(cat.category_id) && styles.categoryTextActive]}>{cat.category_name}</Text></Pressable>)}</ScrollView>}
             {!!error && <View style={styles.inlineError}><Text style={styles.inlineErrorText}>{error}</Text><Pressable onPress={() => setError("")}><Text style={styles.clearSearch}>×</Text></Pressable></View>}
-            {loadingLibrary && !activeList.length ? <View style={styles.loadingBox}><ActivityIndicator size="large" color="#A99BFF"/><Text style={styles.loadingText}>Preparing your library…</Text></View> : filtered.length === 0 ? <View style={styles.emptyBox}><Text style={styles.emptyGlyph}>{tab === "mylist" ? "♡" : "⌕"}</Text><Text style={styles.emptyTitle}>{tab === "mylist" ? "Your list is waiting" : "Nothing to show just yet"}</Text><Text style={styles.emptyText}>{tab === "mylist" ? "Tap the heart on any title to save it here." : search ? "Try another title or clear your search." : "Check your provider account or try another category."}</Text></View> : <View style={styles.grid}>{filtered.map((item) => {
+            {loadingLibrary && !activeList.length ? <View style={styles.loadingBox}><ActivityIndicator size="large" color="#E50914"/><Text style={styles.loadingText}>Loading {title}…</Text></View> : filtered.length === 0 ? <View style={styles.emptyBox}><Text style={styles.emptyGlyph}>{tab === "mylist" ? "♡" : "⌕"}</Text><Text style={styles.emptyTitle}>{tab === "mylist" ? "Your list is waiting" : "Nothing to show just yet"}</Text><Text style={styles.emptyText}>{tab === "mylist" ? "Tap the heart on any title to save it here." : search ? "Try another title or clear your search." : "Check your provider account or try another category."}</Text></View> : <View style={styles.grid}>{visibleItems.map((item) => {
               const itemKind = tab === "mylist" ? ((item._agyashKind as MediaKind) || "live") : currentKind;
               const key = String(item._agyashKey || `${itemKind}:${item.stream_id ?? item.series_id ?? item.name}`);
               const saved = favorites.some((f) => f._agyashKey === key);
               return <View key={key} style={[styles.gridItem, { width: `${100 / columns}%` as any }]}><MediaCard item={item} kind={itemKind} onPress={() => playItem(item, itemKind)} saved={saved} onToggleSaved={() => toggleFavorite(item, itemKind)}/></View>;
             })}</View>}
+            {visibleItems.length < filtered.length && <Pressable onPress={() => setVisibleCount((count) => count + 48)} style={styles.loadMoreButton} accessibilityRole="button"><Text style={styles.loadMoreText}>Load 48 more  ↓</Text></Pressable>}
             <View style={styles.bottomSpace}/>
           </ScrollView>
         </View>
       </View>
+      {busy && signedIn && <View style={styles.actionLoading}><ActivityIndicator size="large" color="#E50914"/><Text style={styles.actionLoadingText}>Opening series…</Text></View>}
       {episodePicker && <View style={styles.episodeBackdrop}><View style={styles.episodePanel}><View style={styles.episodeHeader}><View style={{flex:1}}><Text style={styles.episodeEyebrow}>SERIES EPISODES</Text><Text style={styles.episodeTitle} numberOfLines={1}>{episodePicker.series.name}</Text></View><Pressable onPress={() => setEpisodePicker(null)} style={styles.closeButton}><Text style={styles.closeText}>✕</Text></Pressable></View><FlatList data={episodePicker.episodes} keyExtractor={(episode, index) => String(episode.id || index)} renderItem={({item,index}) => <Pressable onPress={() => {const episodeTitle=`${episodePicker.series.name} · ${item.title || item.name || `Episode ${index+1}`}`;void rememberRecentlyWatched(item,"series",episodeTitle);setEpisodePicker(null);setPlaying({uri:streamUrl("series",item,username.trim(),password),title:episodeTitle});}} style={styles.episodeRow}><View style={styles.episodePlay}><Text style={styles.episodePlayGlyph}>▶</Text></View><View style={{flex:1}}><Text style={styles.episodeName}>{item.title || item.name || `Episode ${index+1}`}</Text><Text style={styles.episodeMeta}>Season {item.season || "—"} · Episode {item.episode_num || index+1}</Text></View><Text style={styles.episodeChevron}>›</Text></Pressable>} /></View></View>}
       {playing && <VideoPlayerModal uri={playing.uri} title={playing.title} onClose={() => setPlaying(null)}/>}
     </SafeAreaView>
@@ -592,81 +652,81 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  appShell: { flex: 1, backgroundColor: "#08090D" },
+  appShell: { flex: 1, backgroundColor: "#080808" },
   loginRoot: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24, overflow: "hidden", minHeight: "100%" },
   loginGlow: { position: "absolute", width: 520, height: 520, borderRadius: 260, backgroundColor: "#211B4B", opacity: 0.65, top: -190, right: -170 },
   logoWrap: { flexDirection: "row", alignItems: "center", gap: 10 },
-  logoGlyph: { width: 35, height: 35, borderRadius: 11, backgroundColor: "#A99BFF", alignItems: "center", justifyContent: "center" },
+  logoGlyph: { width: 35, height: 35, borderRadius: 11, backgroundColor: "#E50914", alignItems: "center", justifyContent: "center" },
   logoGlyphText: { color: "#100D25", fontWeight: "900", fontSize: 21 },
-  logoText: { color: "#F8F8FC", fontSize: 20, letterSpacing: 1.4, fontWeight: "900" },
-  logoAccent: { color: "#A99BFF" },
-  loginCard: { width: "100%", maxWidth: 430, marginTop: 30, padding: 27, backgroundColor: "#14151D", borderColor: "#292A37", borderWidth: 1, borderRadius: 23 },
-  eyebrow: { fontSize: 10, color: "#A99BFF", fontWeight: "800", letterSpacing: 2 },
-  loginTitle: { color: "#F8F8FC", fontSize: 32, lineHeight: 40, fontWeight: "800", marginTop: 10 },
+  logoText: { color: "#F0EEFF", fontSize: 20, letterSpacing: 1.4, fontWeight: "900" },
+  logoAccent: { color: "#E50914" },
+  loginCard: { width: "100%", maxWidth: 430, marginTop: 30, padding: 27, backgroundColor: "#171717", borderColor: "#303030", borderWidth: 1, borderRadius: 23 },
+  eyebrow: { fontSize: 10, color: "#E50914", fontWeight: "800", letterSpacing: 2 },
+  loginTitle: { color: "#F0EEFF", fontSize: 32, lineHeight: 40, fontWeight: "800", marginTop: 10 },
   loginSubtitle: { color: "#A0A0B0", fontSize: 13, lineHeight: 20, marginTop: 7, marginBottom: 25 },
   fieldLabel: { color: "#D9D8E6", fontSize: 10, fontWeight: "800", letterSpacing: 1.5, marginBottom: 8, marginTop: 8 },
-  input: { height: 49, borderRadius: 12, borderWidth: 1, borderColor: "#343543", backgroundColor: "#0C0D13", color: "#FFFFFF", paddingHorizontal: 14, fontSize: 14 },
+  input: { height: 49, borderRadius: 12, borderWidth: 1, borderColor: "#333333", backgroundColor: "#0C0D13", color: "#FFFFFF", paddingHorizontal: 14, fontSize: 14 },
   rememberRow: { flexDirection: "row", alignItems: "center", marginTop: 17, gap: 9 },
   checkbox: { width: 17, height: 17, borderWidth: 1, borderRadius: 5, borderColor: "#69697C", alignItems: "center", justifyContent: "center" },
-  checkboxChecked: { backgroundColor: "#A99BFF", borderColor: "#A99BFF" },
+  checkboxChecked: { backgroundColor: "#E50914", borderColor: "#E50914" },
   checkboxTick: { color: "#100D25", fontSize: 12, fontWeight: "900" },
   rememberText: { color: "#B4B3C4", fontSize: 12 },
   errorText: { color: "#FF959D", fontSize: 12, lineHeight: 18, marginTop: 13 },
-  primaryButton: { height: 50, backgroundColor: "#A99BFF", borderRadius: 12, justifyContent: "center", alignItems: "center", marginTop: 22 },
-  primaryButtonText: { color: "#130E29", fontSize: 14, fontWeight: "900", letterSpacing: 0.3 },
+  primaryButton: { height: 50, backgroundColor: "#E50914", borderRadius: 12, justifyContent: "center", alignItems: "center", marginTop: 22 },
+  primaryButtonText: { color: "#FFFFFF", fontSize: 14, fontWeight: "900", letterSpacing: 0.3 },
   disabledButton: { opacity: 0.7 },
   pressed: { opacity: 0.78, transform: [{ scale: 0.99 }] },
   focused: { borderColor: "#B9AAFF", borderWidth: 2, opacity: 1 },
-  termsText: { color: "#777889", textAlign: "center", fontSize: 10, lineHeight: 16, marginTop: 17 },
-  loginFooter: { color: "#777889", fontWeight: "700", fontSize: 10, letterSpacing: 2, marginTop: 25 },
-  topBar: { height: 76, paddingHorizontal: 25, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#20212B", backgroundColor: "#090A0F" },
+  termsText: { color: "#777777", textAlign: "center", fontSize: 10, lineHeight: 16, marginTop: 17 },
+  loginFooter: { color: "#777777", fontWeight: "700", fontSize: 10, letterSpacing: 2, marginTop: 25 },
+  topBar: { height: 76, paddingHorizontal: 25, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#292929", backgroundColor: "#090A0F" },
   desktopNav: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, flex: 1, marginHorizontal: 22 },
   desktopNavButton: { minHeight: 38, paddingHorizontal: 13, borderRadius: 9, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, backgroundColor: "transparent" },
   desktopNavButtonActive: { backgroundColor: "#242633", borderWidth: 1, borderColor: "#383A4B" },
   desktopNavIcon: { color: "#8D8FA1", fontSize: 14 },
   desktopNavLabel: { color: "#C0C1CD", fontSize: 11, fontWeight: "700" },
   desktopNavTextActive: { color: "#FFFFFF" },
-  mobileNavWrap: { borderBottomWidth: 1, borderBottomColor: "#23232D", backgroundColor: "#0B0C12", maxHeight: 60 },
+  mobileNavWrap: { borderBottomWidth: 1, borderBottomColor: "#292929", backgroundColor: "#111111", maxHeight: 60 },
   mobileNav: { paddingHorizontal: 12, paddingVertical: 9, gap: 7, alignItems: "center" },
-  mobileNavButton: { minHeight: 39, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, paddingHorizontal: 13, paddingVertical: 8, borderRadius: 10, backgroundColor: "#14151D" },
-  mobileNavIcon: { color: "#89899A", fontSize: 16 },
-  mobileNavLabel: { color: "#A7A7B8", fontSize: 11, fontWeight: "700" },
+  mobileNavButton: { minHeight: 39, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, paddingHorizontal: 13, paddingVertical: 8, borderRadius: 10, backgroundColor: "#171717" },
+  mobileNavIcon: { color: "#999999", fontSize: 16 },
+  mobileNavLabel: { color: "#B3B3B3", fontSize: 11, fontWeight: "700" },
   mobileContentScroll: { paddingHorizontal: 14, paddingTop: 16 },
   mobileTopBar: { height: 60, paddingHorizontal: 14 },
   topBarActions: { flexDirection: "row", alignItems: "center", gap: 16 },
   accountBadge: { flexDirection: "row", alignItems: "center", gap: 7, backgroundColor: "#151A1B", borderColor: "#293638", borderWidth: 1, borderRadius: 20, paddingHorizontal: 11, paddingVertical: 7 },
   onlineDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: "#70E2A0" },
   accountBadgeText: { color: "#A9E9C3", fontSize: 9, fontWeight: "800", letterSpacing: 1 },
-  avatarButton: { width: 36, height: 36, alignItems: "center", justifyContent: "center", backgroundColor: "#29243D", borderRadius: 18, borderWidth: 1, borderColor: "#504777" },
-  avatarLetter: { color: "#C8BEFF", fontSize: 15, fontWeight: "800" },
+  avatarButton: { width: 36, height: 36, alignItems: "center", justifyContent: "center", backgroundColor: "#301719", borderRadius: 18, borderWidth: 1, borderColor: "#6E2428" },
+  avatarLetter: { color: "#FFFFFF", fontSize: 15, fontWeight: "800" },
   accountPopover: { position: "absolute", zIndex: 50, right: 20, top: 63, padding: 17, width: 220, borderRadius: 14, backgroundColor: "#1A1B26", borderWidth: 1, borderColor: "#333344" },
-  popoverUser: { color: "#F8F8FC", fontSize: 14, fontWeight: "800" },
+  popoverUser: { color: "#F0EEFF", fontSize: 14, fontWeight: "800" },
   popoverMuted: { color: "#A1A0B1", fontSize: 11, marginTop: 4 },
   logoutButton: { backgroundColor: "#302333", padding: 9, borderRadius: 8, alignItems: "center", marginTop: 13 },
   logoutText: { color: "#FFB2BC", fontSize: 12, fontWeight: "800" },
   mainLayout: { flex: 1, flexDirection: "row" },
-  sidebar: { width: 224, paddingHorizontal: 14, paddingTop: 27, borderRightWidth: 1, borderRightColor: "#20212B", backgroundColor: "#0B0D13" },
+  sidebar: { width: 224, paddingHorizontal: 14, paddingTop: 27, borderRightWidth: 1, borderRightColor: "#292929", backgroundColor: "#111111" },
   navCaption: { color: "#68697B", fontSize: 9, letterSpacing: 1.8, fontWeight: "800", marginHorizontal: 13, marginBottom: 17 },
   navButton: { height: 45, borderRadius: 11, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 5 },
   navButtonActive: { backgroundColor: "#25213B" },
-  navIcon: { color: "#89899A", fontSize: 19, width: 22, textAlign: "center" },
-  navLabel: { color: "#A7A7B8", fontWeight: "600", fontSize: 12 },
-  navTextActive: { color: "#C4BAFF", fontWeight: "800" },
+  navIcon: { color: "#999999", fontSize: 19, width: 22, textAlign: "center" },
+  navLabel: { color: "#B3B3B3", fontWeight: "600", fontSize: 12 },
+  navTextActive: { color: "#FF5962", fontWeight: "800" },
   sidebarCategoryBlock: { flex: 1, minHeight: 130, marginTop: 26 },
   sidebarCategoryTitle: { color: "#686B7D", fontSize: 9, letterSpacing: 1.6, fontWeight: "900", marginHorizontal: 12, marginBottom: 10 },
   sidebarCategoryScroll: { flex: 1 },
   sidebarCategoryButton: { minHeight: 36, paddingHorizontal: 12, borderRadius: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 3 },
   sidebarCategoryButtonActive: { backgroundColor: "#191B28" },
   sidebarCategoryText: { color: "#9294A4", fontSize: 10, fontWeight: "600", flex: 1 },
-  sidebarCategoryTextActive: { color: "#D6D1FF", fontWeight: "800" },
+  sidebarCategoryTextActive: { color: "#FFFFFF", fontWeight: "800" },
   sidebarCategoryCount: { color: "#686B7D", fontSize: 9, fontWeight: "700" },
   sidebarFooter: { marginTop: "auto", marginBottom: 25 },
   sidebarDivider: { height: 1, backgroundColor: "#262632", marginBottom: 17 },
   sidebarNote: { color: "#68697B", fontSize: 10 },
-  sidebarBrand: { color: "#A99BFF", fontWeight: "800", fontSize: 12, marginTop: 6, letterSpacing: 0.5 },
+  sidebarBrand: { color: "#E50914", fontWeight: "800", fontSize: 12, marginTop: 6, letterSpacing: 0.5 },
   contentPane: { flex: 1, minWidth: 0 },
   contentScroll: { paddingHorizontal: 30, paddingTop: 25, paddingBottom: 30 },
-  heroBanner: { minHeight: 355, borderRadius: 23, overflow: "hidden", backgroundColor: "#151927", marginBottom: 34, justifyContent: "center", position: "relative", borderWidth: 1, borderColor: "#272A38" },
+  heroBanner: { minHeight: 355, borderRadius: 23, overflow: "hidden", backgroundColor: "#111111", marginBottom: 34, justifyContent: "center", position: "relative", borderWidth: 1, borderColor: "#272A38" },
   heroImage: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, width: "100%", height: "100%" },
   heroScrim: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "#070A13AA" },
   heroContent: { maxWidth: 690, paddingVertical: 32, paddingHorizontal: 34, zIndex: 1 },
@@ -675,8 +735,8 @@ const styles = StyleSheet.create({
   heroMeta: { color: "#D5D7E2", fontSize: 11, fontWeight: "800", letterSpacing: 0.6, marginTop: 12 },
   heroDescription: { color: "#E0E1E9", fontSize: 13, lineHeight: 20, marginTop: 13, maxWidth: 520 },
   heroActions: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 16, marginTop: 22 },
-  heroPlayButton: { minHeight: 44, paddingHorizontal: 23, borderRadius: 9, alignItems: "center", justifyContent: "center", backgroundColor: "#FFFFFF" },
-  heroPlayText: { color: "#12131A", fontSize: 12, fontWeight: "900" },
+  heroPlayButton: { minHeight: 44, paddingHorizontal: 23, borderRadius: 9, alignItems: "center", justifyContent: "center", backgroundColor: "#E50914" },
+  heroPlayText: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" },
   heroChipRow: { flexDirection: "row", gap: 8, alignItems: "center" },
   heroChip: { color: "#E4EAFB", backgroundColor: "#FFFFFF26", borderRadius: 7, overflow: "hidden", paddingVertical: 7, paddingHorizontal: 11, fontSize: 9, fontWeight: "800", letterSpacing: 0.5 },
   heroControls: { position: "absolute", right: 18, top: "45%", flexDirection: "row", gap: 8, zIndex: 2 },
@@ -692,60 +752,64 @@ const styles = StyleSheet.create({
   recentCardWrap: { width: 156 },
   recentCard: { width: 156 },
   sectionHeading: { flexDirection: "row", gap: 16, justifyContent: "space-between", alignItems: "center", marginBottom: 20 },
-  sectionTitle: { color: "#F8F8FC", fontSize: 23, fontWeight: "900" },
-  sectionSub: { color: "#858697", fontSize: 11, marginTop: 5 },
-  searchBox: { width: 250, maxWidth: "48%", height: 41, borderRadius: 10, borderWidth: 1, borderColor: "#2F303D", backgroundColor: "#12131A", paddingHorizontal: 10, flexDirection: "row", alignItems: "center", gap: 8 },
+  sectionTitle: { color: "#F0EEFF", fontSize: 23, fontWeight: "900" },
+  sectionSub: { color: "#999999", fontSize: 11, marginTop: 5 },
+  searchBox: { width: 250, maxWidth: "48%", height: 41, borderRadius: 10, borderWidth: 1, borderColor: "#333333", backgroundColor: "#12131A", paddingHorizontal: 10, flexDirection: "row", alignItems: "center", gap: 8 },
   searchIcon: { color: "#9696A8", fontSize: 22 },
   searchInput: { color: "#F5F5FC", flex: 1, fontSize: 12 },
-  clearSearch: { color: "#A4A4B5", fontSize: 21, paddingHorizontal: 4 },
+  clearSearch: { color: "#B3B3B3", fontSize: 21, paddingHorizontal: 4 },
   categoryRow: { gap: 8, paddingBottom: 20 },
-  categoryChip: { backgroundColor: "#14151D", borderRadius: 9, borderWidth: 1, borderColor: "#292A37", paddingHorizontal: 13, paddingVertical: 9 },
-  categoryChipActive: { backgroundColor: "#2A2542", borderColor: "#6B5AB1" },
+  categoryChip: { backgroundColor: "#171717", borderRadius: 9, borderWidth: 1, borderColor: "#303030", paddingHorizontal: 13, paddingVertical: 9 },
+  categoryChipActive: { backgroundColor: "#351719", borderColor: "#9E1B23" },
   categoryText: { color: "#A5A5B5", fontSize: 11, fontWeight: "700" },
-  categoryTextActive: { color: "#D1C8FF" },
+  categoryTextActive: { color: "#FFFFFF" },
   grid: { flexDirection: "row", flexWrap: "wrap", marginHorizontal: -7 },
   gridItem: { paddingHorizontal: 7, marginBottom: 22 },
   card: { minWidth: 0 },
-  poster: { width: "100%", aspectRatio: 0.72, borderRadius: 13, backgroundColor: "#1C1D28", overflow: "hidden", position: "relative", borderWidth: 1, borderColor: "#2B2C39", justifyContent: "center", alignItems: "center" },
-  posterImageArea: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, justifyContent: "center", alignItems: "center", backgroundColor: "#252138" },
+  poster: { width: "100%", aspectRatio: 0.72, borderRadius: 13, backgroundColor: "#202020", overflow: "hidden", position: "relative", borderWidth: 1, borderColor: "#2B2C39", justifyContent: "center", alignItems: "center" },
+  posterImageArea: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, justifyContent: "center", alignItems: "center", backgroundColor: "#242020" },
   posterImage: { position: "absolute", width: "100%", height: "100%" },
-  posterFallbackArea: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, justifyContent: "center", alignItems: "center", backgroundColor: "#252138" },
+  posterFallbackArea: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, justifyContent: "center", alignItems: "center", backgroundColor: "#242020" },
   posterFallback: { fontSize: 55, color: "#8A7AD0", fontWeight: "900", opacity: 0.7 },
-  posterOverlay: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "#08090D22", alignItems: "center", justifyContent: "center" },
+  posterOverlay: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "#08080822", alignItems: "center", justifyContent: "center" },
   playGlyph: { color: "#FFFFFF", fontSize: 20, overflow: "hidden", borderRadius: 24, backgroundColor: "#15151FAA", paddingHorizontal: 17, paddingVertical: 13 },
-  kindPill: { position: "absolute", top: 9, left: 9, borderRadius: 5, paddingHorizontal: 7, paddingVertical: 5, backgroundColor: "#A99BFF" },
+  kindPill: { position: "absolute", top: 9, left: 9, borderRadius: 5, paddingHorizontal: 7, paddingVertical: 5, backgroundColor: "#E50914" },
   kindText: { color: "#130E29", fontSize: 8, fontWeight: "900", letterSpacing: 0.5 },
   cardDetails: { flexDirection: "row", alignItems: "flex-start", marginTop: 9, gap: 6 },
   cardNamePress: { flex: 1 },
-  cardName: { color: "#F0F0F7", fontSize: 12, fontWeight: "700", lineHeight: 16 },
+  cardName: { color: "#F0EEFF", fontSize: 12, fontWeight: "700", lineHeight: 16 },
   favoriteButton: { width: 23, height: 25, alignItems: "center", justifyContent: "center" },
   favoriteIcon: { color: "#878798", fontSize: 21 },
   favoriteActive: { color: "#C0B5FF" },
   loadingBox: { minHeight: 250, alignItems: "center", justifyContent: "center", gap: 13 },
-  loadingText: { color: "#A4A4B5", fontSize: 12 },
+  loadingText: { color: "#B3B3B3", fontSize: 12 },
   emptyBox: { minHeight: 240, justifyContent: "center", alignItems: "center", padding: 25 },
   emptyGlyph: { color: "#7E70B8", fontSize: 48, marginBottom: 8 },
   emptyTitle: { color: "#E4E3EF", fontSize: 16, fontWeight: "800" },
   emptyText: { maxWidth: 330, textAlign: "center", color: "#89899B", fontSize: 12, lineHeight: 19, marginTop: 8 },
   inlineError: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderWidth: 1, borderColor: "#61313F", backgroundColor: "#28151D", borderRadius: 10, paddingVertical: 10, paddingHorizontal: 13, marginBottom: 15, gap: 10 },
   inlineErrorText: { color: "#FFB5C0", fontSize: 12, flex: 1 },
+  loadMoreButton: { alignSelf: "center", minHeight: 44, paddingHorizontal: 22, paddingVertical: 12, borderRadius: 10, backgroundColor: "#E50914", marginTop: 4, marginBottom: 18 },
+  loadMoreText: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" },
+  actionLoading: { position: "absolute", zIndex: 500, top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "#080808CC", alignItems: "center", justifyContent: "center", gap: 12 },
+  actionLoadingText: { color: "#FFFFFF", fontSize: 13, fontWeight: "800" },
   bottomSpace: { height: 30 },
   playerBackdrop: { position: "absolute", zIndex: 200, top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "#050508", padding: 18 },
   playerHeader: { height: 50, flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 },
-  playerTitle: { color: "#F8F8FC", fontSize: 17, fontWeight: "800", flex: 1 },
+  playerTitle: { color: "#F0EEFF", fontSize: 17, fontWeight: "800", flex: 1 },
   closeButton: { width: 39, height: 39, alignItems: "center", justifyContent: "center", backgroundColor: "#252633", borderRadius: 20 },
   closeText: { color: "#F5F5FC", fontSize: 18, fontWeight: "800" },
   video: { flex: 1, width: "100%", marginTop: 12, borderRadius: 10, backgroundColor: "#000" },
   playerErrorCard: { position: "absolute", left: 24, right: 24, bottom: 62, padding: 17, borderRadius: 13, backgroundColor: "#171923F2", borderWidth: 1, borderColor: "#6B3443", alignItems: "center", gap: 12 },
   playerErrorText: { color: "#FFD4DA", fontSize: 12, lineHeight: 18, textAlign: "center" },
   playerErrorActions: { flexDirection: "row", justifyContent: "center", gap: 10 },
-  playerRetryButton: { paddingVertical: 10, paddingHorizontal: 18, borderRadius: 9, backgroundColor: "#A99BFF" },
+  playerRetryButton: { paddingVertical: 10, paddingHorizontal: 18, borderRadius: 9, backgroundColor: "#E50914" },
   playerCloseButton: { paddingVertical: 10, paddingHorizontal: 18, borderRadius: 9, backgroundColor: "#373947" },
   playerRetryText: { color: "#FFFFFF", fontSize: 12, fontWeight: "800" },
   episodeBackdrop: { position: "absolute", zIndex: 150, top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "#000B", alignItems: "center", justifyContent: "center", padding: 20 },
-  episodePanel: { maxWidth: 650, width: "100%", maxHeight: "85%", backgroundColor: "#151620", borderWidth: 1, borderColor: "#393746", borderRadius: 18, padding: 18, flex: 1 },
+  episodePanel: { maxWidth: 650, width: "100%", maxHeight: "85%", backgroundColor: "#171717", borderWidth: 1, borderColor: "#393746", borderRadius: 18, padding: 18, flex: 1 },
   episodeHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 10 },
-  episodeEyebrow: { color: "#A99BFF", fontSize: 9, letterSpacing: 1.7, fontWeight: "900" },
+  episodeEyebrow: { color: "#E50914", fontSize: 9, letterSpacing: 1.7, fontWeight: "900" },
   episodeTitle: { color: "#F9F8FF", fontSize: 20, fontWeight: "900", marginTop: 4 },
   episodeRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12, paddingHorizontal: 8, borderBottomColor: "#2C2D38", borderBottomWidth: 1 },
   episodePlay: { width: 37, height: 37, borderRadius: 10, backgroundColor: "#30294B", alignItems: "center", justifyContent: "center" },
