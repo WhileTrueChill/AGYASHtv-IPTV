@@ -301,7 +301,7 @@ export default function App() {
   const [loadingLibrary, setLoadingLibrary] = useState(false);
   const loadedKindsRef = useRef<Set<MediaKind>>(new Set());
   const loadingKindsRef = useRef<Set<MediaKind>>(new Set());
-  const [visibleCount, setVisibleCount] = useState(48);
+  const [visibleCount, setVisibleCount] = useState(24);
   const [error, setError] = useState("");
   const [tab, setTab] = useState<"live" | "movie" | "series" | "mylist">("live");
   const [search, setSearch] = useState("");
@@ -385,7 +385,7 @@ export default function App() {
     setTab(nextTab);
     setCategory("all");
     setSearch("");
-    setVisibleCount(48);
+    setVisibleCount(24);
     setEpisodePicker(null);
     setHeroIndex(0);
     setError("");
@@ -416,7 +416,7 @@ export default function App() {
       setSignedIn(true);
       setTab("live");
       setCategory("all");
-      setVisibleCount(48);
+      setVisibleCount(24);
       if (remember) await storageSet(CREDENTIAL_KEY, JSON.stringify({ providerUrl: normalizedBase, username: user, password: pass }));
       else await storageRemove(CREDENTIAL_KEY);
       await loadLibrary(normalizedBase, user, pass, "live");
@@ -471,7 +471,7 @@ export default function App() {
     return matchesSearch && matchesCategory;
   }), [activeList, search, category]);
   const visibleItems = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount]);
-  useEffect(() => { setVisibleCount(48); }, [tab, category, search]);
+  useEffect(() => { setVisibleCount(24); }, [tab, category, search]);
 
   const toggleFavorite = async (item: MediaItem, kind: MediaKind) => {
     const key = `${kind}:${item.stream_id ?? item.series_id ?? item.name}`;
@@ -566,37 +566,36 @@ export default function App() {
       <StatusBar barStyle="light-content" backgroundColor="#080808" />
       <View style={[styles.topBar, compactLayout && styles.mobileTopBar]}>
         <Logo />
-        {!compactLayout && <View style={styles.desktopNav}>
-          {NAV_ITEMS.map((item) => <Pressable key={item.key} onPress={() => changeTab(item.key)} style={({ focused }) => [styles.desktopNavButton, tab === item.key && styles.desktopNavButtonActive, focused && styles.focused]}>
-            <Text style={[styles.desktopNavIcon, tab === item.key && styles.desktopNavTextActive]}>{item.icon}</Text>
-            <Text style={[styles.desktopNavLabel, tab === item.key && styles.desktopNavTextActive]}>{item.label}</Text>
-          </Pressable>)}
-        </View>}
         <View style={styles.topBarActions}>
           {!compactLayout && <View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput value={search} onChangeText={setSearch} placeholder="Search channels & titles…" placeholderTextColor="#777777" style={styles.searchInput}/>{!!search && <Pressable onPress={() => setSearch("")}><Text style={styles.clearSearch}>×</Text></Pressable>}</View>}
           <View style={styles.accountBadge}><View style={styles.onlineDot}/><Text style={styles.accountBadgeText}>CONNECTED</Text></View>
-          <Pressable onPress={() => setAccountOpen((v) => !v)} style={styles.avatarButton}><Text style={styles.avatarLetter}>{username.slice(0,1).toUpperCase()}</Text></Pressable>
+          <Pressable onPress={() => setAccountOpen((v) => !v)} style={styles.avatarButton} accessibilityRole="button" accessibilityLabel="Account"><Text style={styles.avatarLetter}>{username.slice(0,1).toUpperCase()}</Text></Pressable>
         </View>
       </View>
       {accountOpen && <View style={styles.accountPopover}><Text style={styles.popoverUser}>{userInfo?.username || username}</Text><Text style={styles.popoverMuted}>Status: {userInfo?.status || "Active"}</Text><Pressable onPress={logout} style={styles.logoutButton}><Text style={styles.logoutText}>Sign out</Text></Pressable></View>}
-      {compactLayout && (
-        <View style={styles.mobileNavWrap}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.mobileNav}>
-            {NAV_ITEMS.map((item) => (
-              <Pressable
-                key={item.key}
-                onPress={() => changeTab(item.key)}
-                style={({ focused }) => [styles.mobileNavButton, tab === item.key && styles.navButtonActive, focused && styles.focused]}
-                accessibilityRole="button"
-                accessibilityLabel={item.label}
-              >
-                <Text style={[styles.mobileNavIcon, tab === item.key && styles.navTextActive]}>{item.icon}</Text>
-                <Text style={[styles.mobileNavLabel, tab === item.key && styles.navTextActive]}>{item.label}</Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </View>
-      )}
+      <View style={styles.mainNavigation} nativeID="agyash-main-navigation">
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.mainNavigationInner}>
+          {NAV_ITEMS.map((item) => (
+            <Pressable
+              key={item.key}
+              onPress={() => changeTab(item.key)}
+              style={({ pressed, focused }) => [
+                styles.mainNavigationButton,
+                tab === item.key && styles.mainNavigationButtonActive,
+                pressed && styles.mainNavigationButtonPressed,
+                focused && styles.focused
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={item.label}
+              accessibilityState={{ selected: tab === item.key }}
+              hitSlop={6}
+            >
+              <Text style={[styles.mainNavigationIcon, tab === item.key && styles.mainNavigationTextActive]}>{item.icon}</Text>
+              <Text style={[styles.mainNavigationLabel, tab === item.key && styles.mainNavigationTextActive]}>{item.label}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      </View>
       <View style={styles.mainLayout}>
         <View style={styles.contentPane}>
           <ScrollView contentContainerStyle={[styles.contentScroll, compactLayout && styles.mobileContentScroll]} showsVerticalScrollIndicator={false}>
@@ -610,7 +609,11 @@ export default function App() {
                 <Text style={styles.heroDescription} numberOfLines={3}>{featuredItem?.plot || "Discover live channels, blockbuster films and your favourite series — all in one place."}</Text>
                 <View style={styles.heroActions}>
                   {featuredItem && <Pressable onPress={() => playItem(featuredItem, featuredKind)} style={({ pressed }) => [styles.heroPlayButton, pressed && styles.pressed]}><Text style={styles.heroPlayText}>▶  Play now</Text></Pressable>}
-                  <View style={styles.heroChipRow}><Text style={styles.heroChip}>✦ LIVE</Text><Text style={styles.heroChip}>FILMS</Text><Text style={styles.heroChip}>SERIES</Text></View>
+                  <View style={styles.heroChipRow}>
+                    <Pressable onPress={() => changeTab("live")} style={({ pressed }) => [styles.heroQuickButton, pressed && styles.mainNavigationButtonPressed]} accessibilityRole="button"><Text style={styles.heroQuickText}>LIVE TV</Text></Pressable>
+                    <Pressable onPress={() => changeTab("movie")} style={({ pressed }) => [styles.heroQuickButton, pressed && styles.mainNavigationButtonPressed]} accessibilityRole="button"><Text style={styles.heroQuickText}>MOVIES</Text></Pressable>
+                    <Pressable onPress={() => changeTab("series")} style={({ pressed }) => [styles.heroQuickButton, pressed && styles.mainNavigationButtonPressed]} accessibilityRole="button"><Text style={styles.heroQuickText}>SERIES</Text></Pressable>
+                  </View>
                 </View>
               </View>
               {featuredList.length > 1 && <View style={styles.heroControls}>
@@ -633,13 +636,13 @@ export default function App() {
             <View style={styles.sectionHeading}><View><Text style={styles.sectionTitle}>{title}</Text><Text style={styles.sectionSub}>{loadingLibrary ? "Loading your library…" : `${filtered.length.toLocaleString()} titles available`}</Text></View>{compactLayout && <View style={styles.searchBox}><Text style={styles.searchIcon}>⌕</Text><TextInput value={search} onChangeText={setSearch} placeholder="Search titles…" placeholderTextColor="#777777" style={styles.searchInput}/>{!!search && <Pressable onPress={() => setSearch("")}><Text style={styles.clearSearch}>×</Text></Pressable>}</View>}</View>
             {tab !== "mylist" && activeCategories.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.categoryRow}><Pressable onPress={() => setCategory("all")} style={[styles.categoryChip, category === "all" && styles.categoryChipActive]}><Text style={[styles.categoryText, category === "all" && styles.categoryTextActive]}>All</Text></Pressable>{activeCategories.map((cat) => <Pressable key={String(cat.category_id)} onPress={() => setCategory(String(cat.category_id))} style={[styles.categoryChip, category === String(cat.category_id) && styles.categoryChipActive]}><Text style={[styles.categoryText, category === String(cat.category_id) && styles.categoryTextActive]}>{cat.category_name}</Text></Pressable>)}</ScrollView>}
             {!!error && <View style={styles.inlineError}><Text style={styles.inlineErrorText}>{error}</Text><Pressable onPress={() => setError("")}><Text style={styles.clearSearch}>×</Text></Pressable></View>}
-            {loadingLibrary && !activeList.length ? <View style={styles.loadingBox}><ActivityIndicator size="large" color="#E50914"/><Text style={styles.loadingText}>Loading {title}…</Text></View> : filtered.length === 0 ? <View style={styles.emptyBox}><Text style={styles.emptyGlyph}>{tab === "mylist" ? "♡" : "⌕"}</Text><Text style={styles.emptyTitle}>{tab === "mylist" ? "Your list is waiting" : "Nothing to show just yet"}</Text><Text style={styles.emptyText}>{tab === "mylist" ? "Tap the heart on any title to save it here." : search ? "Try another title or clear your search." : "Check your provider account or try another category."}</Text></View> : <View style={styles.grid}>{visibleItems.map((item) => {
+            {loadingLibrary && !activeList.length ? <View style={styles.loadingBox}><ActivityIndicator size="large" color="#E50914"/><Text style={styles.loadingTitle}>Loading {title}…</Text><Text style={styles.loadingText}>Your library is being prepared</Text></View> : filtered.length === 0 ? <View style={styles.emptyBox}><Text style={styles.emptyGlyph}>{tab === "mylist" ? "♡" : "⌕"}</Text><Text style={styles.emptyTitle}>{tab === "mylist" ? "Your list is waiting" : search ? "No matching titles" : `No ${title} loaded`}</Text><Text style={styles.emptyText}>{tab === "mylist" ? "Tap the heart on any title to save it here." : search ? "Try another title or clear your search." : error || `Your provider returned no ${title.toLowerCase()} yet.`}</Text>{tab !== "mylist" && !search && <Pressable onPress={() => { loadedKindsRef.current.delete(tab); void loadLibrary(resolvedProviderBase || providerUrl.trim(), username.trim(), password, tab); }} style={styles.retryTabButton} accessibilityRole="button"><Text style={styles.retryTabButtonText}>Retry loading {title}</Text></Pressable>}</View> : <View style={styles.grid}>{visibleItems.map((item) => {
               const itemKind = tab === "mylist" ? ((item._agyashKind as MediaKind) || "live") : currentKind;
               const key = String(item._agyashKey || `${itemKind}:${item.stream_id ?? item.series_id ?? item.name}`);
               const saved = favorites.some((f) => f._agyashKey === key);
               return <View key={key} style={[styles.gridItem, { width: `${100 / columns}%` as any }]}><MediaCard item={item} kind={itemKind} onPress={() => playItem(item, itemKind)} saved={saved} onToggleSaved={() => toggleFavorite(item, itemKind)}/></View>;
             })}</View>}
-            {visibleItems.length < filtered.length && <Pressable onPress={() => setVisibleCount((count) => count + 48)} style={styles.loadMoreButton} accessibilityRole="button"><Text style={styles.loadMoreText}>Load 48 more  ↓</Text></Pressable>}
+            {visibleItems.length < filtered.length && <Pressable onPress={() => setVisibleCount((count) => count + 24)} style={styles.loadMoreButton} accessibilityRole="button"><Text style={styles.loadMoreText}>Load 24 more  ↓</Text></Pressable>}
             <View style={styles.bottomSpace}/>
           </ScrollView>
         </View>
@@ -686,6 +689,19 @@ const styles = StyleSheet.create({
   desktopNavIcon: { color: "#8D8FA1", fontSize: 14 },
   desktopNavLabel: { color: "#C0C1CD", fontSize: 11, fontWeight: "700" },
   desktopNavTextActive: { color: "#FFFFFF" },
+  mainNavigation: { height: 58, backgroundColor: "#111111", borderBottomWidth: 1, borderBottomColor: "#303030", justifyContent: "center" },
+  mainNavigationInner: { flexGrow: 1, alignItems: "center", justifyContent: "center", gap: 9, paddingHorizontal: 14 },
+  mainNavigationButton: { minWidth: 116, height: 42, paddingHorizontal: 18, borderRadius: 10, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 9, backgroundColor: "#1A1A1A", borderWidth: 1, borderColor: "#343434" },
+  mainNavigationButtonActive: { backgroundColor: "#E50914", borderColor: "#FF3944" },
+  mainNavigationButtonPressed: { opacity: 0.75, transform: [{ scale: 0.98 }] },
+  mainNavigationIcon: { color: "#B3B3B3", fontSize: 15, fontWeight: "800" },
+  mainNavigationLabel: { color: "#F0EEFF", fontSize: 12, fontWeight: "900", letterSpacing: 0.4 },
+  mainNavigationTextActive: { color: "#FFFFFF" },
+  heroQuickButton: { minHeight: 34, minWidth: 84, paddingHorizontal: 13, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: "#E50914" },
+  heroQuickText: { color: "#FFFFFF", fontSize: 10, fontWeight: "900", letterSpacing: 0.4 },
+  retryTabButton: { marginTop: 16, minHeight: 42, paddingHorizontal: 18, paddingVertical: 11, borderRadius: 9, backgroundColor: "#E50914", alignItems: "center", justifyContent: "center" },
+  retryTabButtonText: { color: "#FFFFFF", fontSize: 12, fontWeight: "900" },
+  loadingTitle: { color: "#FFFFFF", fontSize: 14, fontWeight: "900" },
   mobileNavWrap: { borderBottomWidth: 1, borderBottomColor: "#292929", backgroundColor: "#111111", maxHeight: 60 },
   mobileNav: { paddingHorizontal: 12, paddingVertical: 9, gap: 7, alignItems: "center" },
   mobileNavButton: { minHeight: 39, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, paddingHorizontal: 13, paddingVertical: 8, borderRadius: 10, backgroundColor: "#171717" },
