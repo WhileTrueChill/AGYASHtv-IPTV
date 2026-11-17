@@ -301,6 +301,7 @@ export default function App() {
   const [loadingLibrary, setLoadingLibrary] = useState(false);
   const loadedKindsRef = useRef<Set<MediaKind>>(new Set());
   const loadingKindsRef = useRef<Set<MediaKind>>(new Set());
+  const sessionGenerationRef = useRef(0);
   const [visibleCount, setVisibleCount] = useState(24);
   const [error, setError] = useState("");
   const [tab, setTab] = useState<"live" | "movie" | "series" | "mylist">("live");
@@ -329,6 +330,7 @@ export default function App() {
           setProviderUrl(parsed.providerUrl || "");
           setUsername(parsed.username || "");
           setPassword(parsed.password || "");
+          setRemember(true);
         }
         const savedFavorites = await storageGet(FAVORITES_KEY);
         if (savedFavorites) setFavorites(JSON.parse(savedFavorites));
@@ -338,7 +340,8 @@ export default function App() {
     })();
   }, []);
 
-  const loadLibrary = async (base: string, user: string, pass: string, kind: MediaKind) => {
+  const loadLibrary = async (base: string, user: string, pass: string, kind: MediaKind, generation = sessionGenerationRef.current) => {
+    if (generation !== sessionGenerationRef.current) return;
     if (loadedKindsRef.current.has(kind) || loadingKindsRef.current.has(kind)) return;
     loadingKindsRef.current.add(kind);
     setLoadingLibrary(true);
@@ -354,6 +357,7 @@ export default function App() {
         apiRequest<any[]>(base, user, pass, config.categories),
         apiRequest<any[]>(base, user, pass, config.items),
       ]);
+      if (generation !== sessionGenerationRef.current) return;
       const failures: string[] = [];
 
       if (categoryResult.status === "fulfilled" && Array.isArray(categoryResult.value)) {
@@ -376,8 +380,10 @@ export default function App() {
         setError(`${config.label} could not load its ${failures.join(" and ")}. Check the IPTV provider and try this tab again.`);
       }
     } finally {
-      loadingKindsRef.current.delete(kind);
-      setLoadingLibrary(loadingKindsRef.current.size > 0);
+      if (generation === sessionGenerationRef.current) {
+        loadingKindsRef.current.delete(kind);
+        setLoadingLibrary(loadingKindsRef.current.size > 0);
+      }
     }
   };
 
@@ -403,6 +409,10 @@ export default function App() {
     const user = username.trim();
     const pass = password;
     if (!base || !user || !pass) { setError("Enter your Server URL, username and password."); return; }
+    const generation = ++sessionGenerationRef.current;
+    loadedKindsRef.current.clear();
+    loadingKindsRef.current.clear();
+    setLoadingLibrary(false);
     setBusy(true);
     try {
       const normalizedBase = normalizeProviderBase(base);
@@ -411,16 +421,18 @@ export default function App() {
       if (!result?.user_info || Number(result.user_info.auth) !== 1) {
         throw new Error("Login failed. Check your username/password or contact your IPTV provider.");
       }
-      loadedKindsRef.current.clear();
+      if (generation !== sessionGenerationRef.current) return;
       setUserInfo(result.user_info);
       setSignedIn(true);
+      setBusy(false);
       setTab("live");
       setCategory("all");
       setVisibleCount(24);
       if (remember) await storageSet(CREDENTIAL_KEY, JSON.stringify({ providerUrl: normalizedBase, username: user, password: pass }));
       else await storageRemove(CREDENTIAL_KEY);
-      await loadLibrary(normalizedBase, user, pass, "live");
+      await loadLibrary(normalizedBase, user, pass, "live", generation);
     } catch (e) {
+      if (generation !== sessionGenerationRef.current) return;
       setSignedIn(false);
       const message = e instanceof Error ? e.message : readableApiError(e, "Login failed. Try again.");
       setError(message === "[object Object]"
@@ -432,6 +444,10 @@ export default function App() {
   };
 
   const logout = async () => {
+    sessionGenerationRef.current += 1;
+    resolvedProviderBase = "";
+    loadedKindsRef.current.clear();
+    loadingKindsRef.current.clear();
     if (Platform.OS === "web") {
       try {
         await fetch("/api/xtream", {
@@ -447,9 +463,10 @@ export default function App() {
     setLoadingLibrary(false);
     setSignedIn(false); setUserInfo(null); setLive([]); setMovies([]); setSeries([]);
     setLiveCategories([]); setMovieCategories([]); setSeriesCategories([]);
+    setProviderUrl(""); setUsername(""); setPassword(""); setRemember(false);
     setSearch(""); setError(""); setAccountOpen(false); setEpisodePicker(null); setPlaying(null);
     setRecentlyWatched([]);
-    await storageRemove(CREDENTIAL_KEY);
+    await Promise.all([storageRemove(CREDENTIAL_KEY), storageRemove(RECENT_KEY)]);
   };
 
   const activeList = useMemo(() => {
