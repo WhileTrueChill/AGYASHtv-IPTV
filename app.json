@@ -2,13 +2,13 @@
   "expo": {
     "name": "AGYASHtv",
     "slug": "agyashtv",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "default",
     "userInterfaceStyle": "dark",
     "scheme": "agyashtv",
     "android": {
       "package": "com.agyash.tv",
-      "versionCode": 1,
+      "versionCode": 2,
       "permissions": [],
       "softwareKeyboardLayoutMode": "pan"
     },
